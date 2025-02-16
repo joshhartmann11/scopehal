@@ -88,42 +88,15 @@ public:
 	virtual bool IsInterleaving() override;
 	virtual bool SetInterleaving(bool combine) override;
 
-	//ADC configuration
-	virtual std::vector<AnalogBank> GetAnalogBanks() override;
-	virtual AnalogBank GetAnalogBank(size_t channel) override;
-	virtual bool IsADCModeConfigurable() override;
-	virtual std::vector<std::string> GetADCModeNames(size_t channel) override;
-	virtual size_t GetADCMode(size_t channel) override;
-	virtual void SetADCMode(size_t channel, size_t mode) override;
-
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	// Logic analyzer configuration
 
 	virtual std::vector<DigitalBank> GetDigitalBanks() override;
 	virtual DigitalBank GetDigitalBank(size_t channel) override;
-	virtual bool IsDigitalHysteresisConfigurable() override;
-	virtual bool IsDigitalThresholdConfigurable() override;
-	virtual float GetDigitalHysteresis(size_t channel) override;
-	virtual float GetDigitalThreshold(size_t channel) override;
-	virtual void SetDigitalHysteresis(size_t channel, float level) override;
-	virtual void SetDigitalThreshold(size_t channel, float level) override;
 
 	enum Series
 	{
-		SERIES_3x0xD,		//3000 series (first x=2 or 4 Chan, 2nd x is BW)
-		SERIES_3x0xDMSO,	//3000 series+16bits MSO(first x=2 or 4 Chan, 2nd x is BW)
-		SERIES_6403E,		//Lowest end 6000E model has less ADCs
-		SERIES_6x0xE,		//6000 series with 8 bit resolution only
-		SERIES_6x2xE,		//6000 series with FlexRes
-
 		SERIES_UNKNOWN	  //unknown or invalid model name
-	};
-
-	enum ADCMode
-	{
-		ADC_MODE_8BIT = 0,
-		ADC_MODE_10BIT = 1,
-		ADC_MODE_12BIT = 2
 	};
 
 	bool IsDigitalPodPresent(size_t npod);
@@ -135,10 +108,6 @@ public:
 protected:
 	void IdentifyHardware();
 
-	//Helpers for determining legal configurations
-	bool Is10BitModeAvailable();
-	bool Is12BitModeAvailable();
-	size_t GetEnabledAnalogChannelCount();
 	size_t GetEnabledDigitalPodCount();
 
 	size_t GetEnabledAnalogChannelCountRange(size_t start, size_t end);
@@ -149,10 +118,6 @@ protected:
 	size_t GetEnabledAnalogChannelCountCToD() { return GetEnabledAnalogChannelCountRange(2, 3); }
 	size_t GetEnabledAnalogChannelCountEToF() { return GetEnabledAnalogChannelCountRange(4, 5); }
 	size_t GetEnabledAnalogChannelCountGToH() { return GetEnabledAnalogChannelCountRange(6, 7); }
-
-	bool CanEnableChannel6000Series8Bit(size_t i);
-	bool CanEnableChannel6000Series10Bit(size_t i);
-	bool CanEnableChannel6000Series12Bit(size_t i);
 
 	std::string GetChannelColor(size_t i);
 
@@ -167,21 +132,9 @@ protected:
 	//Most Pico API calls are write only, so we have to maintain all state clientside.
 	//This isn't strictly a cache anymore since it's never flushed!
 	std::map<size_t, double> m_channelAttenuations;
-	ADCMode m_adcMode;
 	std::map<int, bool> m_digitalBankPresent;
 	std::map<int, float> m_digitalThresholds;
 	std::map<int, float> m_digitalHysteresis;
-
-	//Function generator state
-	bool m_awgEnabled;
-	float m_awgDutyCycle;
-	float m_awgRange;
-	float m_awgOffset;
-	float m_awgFrequency;
-	FunctionGenerator::WaveShape m_awgShape;
-	FunctionGenerator::OutputImpedance m_awgImpedance;
-
-	Series m_series;
 
 	///@brief Buffers for storing raw ADC samples before converting to fp32
 	std::vector<std::unique_ptr<AcceleratorBuffer<int16_t>>> m_analogRawWaveformBuffers;

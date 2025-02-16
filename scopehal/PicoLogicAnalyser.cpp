@@ -38,11 +38,6 @@
 
 using namespace std;
 
-#define RATE_5GSPS (INT64_C(5000) * INT64_C(1000) * INT64_C(1000))
-#define RATE_2P5GSPS (INT64_C(2500) * INT64_C(1000) * INT64_C(1000))
-#define RATE_1P25GSPS (INT64_C(1250) * INT64_C(1000) * INT64_C(1000))
-#define RATE_625MSPS (INT64_C(625) * INT64_C(1000) * INT64_C(1000))
-
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //Construction / destruction
 
@@ -50,39 +45,10 @@ PicoLogicAnalyser::PicoLogicAnalyser(SCPITransport* transport)
 	: SCPIDevice(transport), SCPIInstrument(transport), RemoteBridgeOscilloscope(transport)
 {
 	//Set up initial cache configuration as "not valid" and let it populate as we go
-
 	IdentifyHardware();
 
-	//Set resolution
-	SetADCMode(0, ADC_MODE_8BIT);
-
-	//Add analog channel objects
-	for(size_t i = 0; i < m_analogChannelCount; i++)
-	{
-		//Hardware name of the channel
-		string chname = "A";
-		chname[0] += i;
-
-		//Create the channel
-		auto chan = new OscilloscopeChannel(this,
-			chname,
-			GetChannelColor(i),
-			Unit(Unit::UNIT_FS),
-			Unit(Unit::UNIT_VOLTS),
-			Stream::STREAM_TYPE_ANALOG,
-			i);
-		m_channels.push_back(chan);
-		chan->SetDefaultDisplayName();
-
-		//Set initial configuration so we have a well-defined instrument state
-		m_channelAttenuations[i] = 1;
-		SetChannelCoupling(i, OscilloscopeChannel::COUPLE_DC_1M);
-		SetChannelOffset(i, 0, 0);
-		SetChannelVoltageRange(i, 0, 5);
-	}
-
 	//Add digital channels (named 1D0...7 and 2D0...7)
-	m_digitalChannelBase = m_analogChannelCount;
+	m_digitalChannelBase = 0;
 	for(size_t i = 0; i < m_digitalChannelCount; i++)
 	{
 		//Hardware name of the channel
@@ -103,50 +69,10 @@ PicoLogicAnalyser::PicoLogicAnalyser(SCPITransport* transport)
 			chnum);
 		m_channels.push_back(chan);
 		chan->SetDefaultDisplayName();
-
-		SetDigitalHysteresis(chnum, 0.1);
-		SetDigitalThreshold(chnum, 0);
 	}
 
-	//Set initial memory configuration.
-	switch(m_series)
-	{
-		case SERIES_3x0xD:
-		case SERIES_3x0xDMSO:
-		{
-			//62.5 Msps is the highest rate the 3000 series supports with all channels, including MSO, active.
-			SetSampleRate(62500000L);
-			SetSampleDepth(100000);
-		}
-		break;
-
-		case SERIES_6403E:
-		case SERIES_6x0xE:
-		case SERIES_6x2xE:
-		{
-			//625 Msps is the highest rate the 6000 series supports with all channels, including MSO, active.
-			SetSampleRate(625000000L);
-			SetSampleDepth(1000000);
-		}
-		break;
-
-		default:
-			LogWarning("Unknown/unsupported Pico model\n");
-			break;
-	}
-
-	m_awgChannel = nullptr;
-
-	//Add the external trigger input
-	m_extTrigChannel = new OscilloscopeChannel(this,
-		"EX",
-		"#808080",
-		Unit(Unit::UNIT_FS),
-		Unit(Unit::UNIT_COUNTS),
-		Stream::STREAM_TYPE_TRIGGER,
-		m_channels.size());
-	m_channels.push_back(m_extTrigChannel);
-	m_extTrigChannel->SetDefaultDisplayName();
+	SetSampleRate(100000L);
+	SetSampleDepth(10000);
 
 	//Configure the trigger
 	auto trig = new EdgeTrigger(this);
@@ -156,14 +82,6 @@ PicoLogicAnalyser::PicoLogicAnalyser(SCPITransport* transport)
 	SetTrigger(trig);
 	PushTrigger();
 	SetTriggerOffset(10 * 1000L * 1000L);
-
-	//Initialize waveform buffers
-	for(size_t i = 0; i < m_analogChannelCount; i++)
-	{
-		m_analogRawWaveformBuffers.push_back(std::make_unique<AcceleratorBuffer<int16_t>>());
-		m_analogRawWaveformBuffers[i]->SetCpuAccessHint(AcceleratorBuffer<int16_t>::HINT_LIKELY);
-		m_analogRawWaveformBuffers[i]->SetGpuAccessHint(AcceleratorBuffer<int16_t>::HINT_LIKELY);
-	}
 
 	//Create Vulkan objects for the waveform conversion
 	m_queue = g_vkQueueManager->GetComputeQueue("PicoLogicAnalyser.queue");
@@ -230,14 +148,11 @@ string PicoLogicAnalyser::GetChannelColor(size_t i)
 
 void PicoLogicAnalyser::IdentifyHardware()
 {
-	//Assume no MSO channels to start
-	m_digitalChannelCount = 0;
-
 	LogWarning("PicoScope model \"%s\"\n", m_model.c_str());
 
 	// Ask the scope how many channels it has
 	m_transport->SendCommand("CHANS?");
-	m_analogChannelCount = stoi(m_transport->ReadReply());
+	m_digitalChannelCount = stoi(m_transport->ReadReply());
 }
 
 PicoLogicAnalyser::~PicoLogicAnalyser()
@@ -249,25 +164,11 @@ PicoLogicAnalyser::~PicoLogicAnalyser()
 
 unsigned int PicoLogicAnalyser::GetInstrumentTypes() const
 {
-	switch(m_series)
-	{
-		//has function generator
-		case SERIES_3x0xD:
-		case SERIES_3x0xDMSO:
-		case SERIES_6x0xE:
-		case SERIES_6x2xE:
-			return Instrument::INST_OSCILLOSCOPE | Instrument::INST_FUNCTION;
-
-		//no special features
-		default:
-			return Instrument::INST_OSCILLOSCOPE;
-	}
+	return Instrument::INST_OSCILLOSCOPE;
 }
 
 uint32_t PicoLogicAnalyser::GetInstrumentTypesForChannel(size_t i) const
 {
-	if(m_awgChannel && (m_awgChannel->GetIndex() == i))
-		return Instrument::INST_FUNCTION;
 	return Instrument::INST_OSCILLOSCOPE;
 }
 
@@ -337,26 +238,7 @@ void PicoLogicAnalyser::DisableChannel(size_t i)
 vector<OscilloscopeChannel::CouplingType> PicoLogicAnalyser::GetAvailableCouplings(size_t /*i*/)
 {
 	vector<OscilloscopeChannel::CouplingType> ret;
-	switch(m_series)
-	{
-		case SERIES_3x0xD:
-		case SERIES_3x0xDMSO:
-		{
-			ret.push_back(OscilloscopeChannel::COUPLE_DC_1M);
-			ret.push_back(OscilloscopeChannel::COUPLE_AC_1M);
-		}
-		break;
-
-		case SERIES_6x0xE:
-		case SERIES_6x2xE:
-		default:
-		{
-			ret.push_back(OscilloscopeChannel::COUPLE_DC_1M);
-			ret.push_back(OscilloscopeChannel::COUPLE_AC_1M);
-			ret.push_back(OscilloscopeChannel::COUPLE_DC_50);
-			ret.push_back(OscilloscopeChannel::COUPLE_GND);
-		}
-	}
+	ret.push_back(OscilloscopeChannel::COUPLE_DC_1M);
 	return ret;
 }
 
@@ -375,7 +257,7 @@ void PicoLogicAnalyser::SetChannelAttenuation(size_t i, double atten)
 	double oldAtten = m_channelAttenuations[i];
 	m_channelAttenuations[i] = atten;
 
-	//Rescale channel voltage range and offset
+	// Rescale channel voltage range and offset
 	double delta = atten / oldAtten;
 	m_channelVoltageRanges[i] *= delta;
 	m_channelOffsets[i] *= delta;
@@ -447,131 +329,89 @@ bool PicoLogicAnalyser::AcquireData()
 		chnum = tmp[0];
 		memdepth = tmp[1];
 
-		//Analog channels
-		if(chnum < m_analogChannelCount)
+		int16_t* buf = new int16_t[memdepth];
+
+		float trigphase;
+		if(!m_transport->ReadRawData(sizeof(trigphase), (uint8_t*)&trigphase))
+			return false;
+		trigphase = -trigphase * fs_per_sample;
+		if(!m_transport->ReadRawData(memdepth * sizeof(int16_t), (uint8_t*)buf))
+			return false;
+
+		size_t podnum = chnum - m_analogChannelCount;
+		if(podnum > 2)
 		{
-			auto& abuf = m_analogRawWaveformBuffers[chnum];
-			abuf->resize(memdepth);
-			abuf->PrepareForCpuAccess();
-			achans.push_back(chnum);
+			LogError("Digital pod number was >2 (chnum = %zu). Possible protocol desync or data corruption?\n", chnum);
+			return false;
+		}
 
-			//Scale and offset are sent in the header since they might have changed since the capture began
-			if(!m_transport->ReadRawData(sizeof(config), (uint8_t*)&config))
-				return false;
-			float scale = config[0];
-			float offset = config[1];
-			float trigphase = -config[2] * fs_per_sample;
-			scale *= GetChannelAttenuation(chnum);
-			offset *= GetChannelAttenuation(chnum);
+		//Create buffers for output waveforms
+		SparseDigitalWaveform* caps[8];
+		for(size_t j = 0; j < 8; j++)
+		{
+			auto nchan = m_digitalChannelBase + 8 * podnum + j;
+			caps[j] = AllocateDigitalWaveform(m_nickname + "." + GetOscilloscopeChannel(nchan)->GetHwname());
+			s[GetOscilloscopeChannel(nchan)] = caps[j];
+		}
 
-			//TODO: stream timestamp from the server
-			if(!m_transport->ReadRawData(memdepth * sizeof(int16_t), reinterpret_cast<uint8_t*>(abuf->GetCpuPointer())))
-				return false;
+//Now that we have the waveform data, unpack it into individual channels
+#pragma omp parallel for
+		for(size_t j = 0; j < 8; j++)
+		{
+			//Bitmask for this digital channel
+			int16_t mask = (1 << j);
 
-			abuf->MarkModifiedFromCpu();
-
-			//Create our waveform
-			auto cap = AllocateAnalogWaveform(m_nickname + "." + GetOscilloscopeChannel(i)->GetHwname());
+			//Create the waveform
+			auto cap = caps[j];
 			cap->m_timescale = fs_per_sample;
 			cap->m_triggerPhase = trigphase;
 			cap->m_startTimestamp = time(NULL);
 			cap->m_startFemtoseconds = fs;
+
+			//Preallocate memory assuming no deduplication possible
 			cap->Resize(memdepth);
-			awfms.push_back(cap);
-			scales.push_back(scale);
-			offsets.push_back(offset);
+			cap->PrepareForCpuAccess();
 
-			s[GetOscilloscopeChannel(chnum)] = cap;
-		}
+			//First sample never gets deduplicated
+			bool last = (buf[0] & mask) ? true : false;
+			size_t k = 0;
+			cap->m_offsets[0] = 0;
+			cap->m_durations[0] = 1;
+			cap->m_samples[0] = last;
 
-		//Digital pod
-		else
-		{
-			int16_t* buf = new int16_t[memdepth];
-
-			float trigphase;
-			if(!m_transport->ReadRawData(sizeof(trigphase), (uint8_t*)&trigphase))
-				return false;
-			trigphase = -trigphase * fs_per_sample;
-			if(!m_transport->ReadRawData(memdepth * sizeof(int16_t), (uint8_t*)buf))
-				return false;
-
-			size_t podnum = chnum - m_analogChannelCount;
-			if(podnum > 2)
+			//Read and de-duplicate the other samples
+			//TODO: can we vectorize this somehow?
+			for(size_t m = 1; m < memdepth; m++)
 			{
-				LogError(
-					"Digital pod number was >2 (chnum = %zu). Possible protocol desync or data corruption?\n", chnum);
-				return false;
-			}
+				bool sample = (buf[m] & mask) ? true : false;
 
-			//Create buffers for output waveforms
-			SparseDigitalWaveform* caps[8];
-			for(size_t j = 0; j < 8; j++)
-			{
-				auto nchan = m_digitalChannelBase + 8 * podnum + j;
-				caps[j] = AllocateDigitalWaveform(m_nickname + "." + GetOscilloscopeChannel(nchan)->GetHwname());
-				s[GetOscilloscopeChannel(nchan)] = caps[j];
-			}
+				//Deduplicate consecutive samples with same value
+				//FIXME: temporary workaround for rendering bugs
+				//if(last == sample)
+				if((last == sample) && ((m + 3) < memdepth))
+					cap->m_durations[k]++;
 
-//Now that we have the waveform data, unpack it into individual channels
-#pragma omp parallel for
-			for(size_t j = 0; j < 8; j++)
-			{
-				//Bitmask for this digital channel
-				int16_t mask = (1 << j);
-
-				//Create the waveform
-				auto cap = caps[j];
-				cap->m_timescale = fs_per_sample;
-				cap->m_triggerPhase = trigphase;
-				cap->m_startTimestamp = time(NULL);
-				cap->m_startFemtoseconds = fs;
-
-				//Preallocate memory assuming no deduplication possible
-				cap->Resize(memdepth);
-				cap->PrepareForCpuAccess();
-
-				//First sample never gets deduplicated
-				bool last = (buf[0] & mask) ? true : false;
-				size_t k = 0;
-				cap->m_offsets[0] = 0;
-				cap->m_durations[0] = 1;
-				cap->m_samples[0] = last;
-
-				//Read and de-duplicate the other samples
-				//TODO: can we vectorize this somehow?
-				for(size_t m = 1; m < memdepth; m++)
+				//Nope, it toggled - store the new value
+				else
 				{
-					bool sample = (buf[m] & mask) ? true : false;
-
-					//Deduplicate consecutive samples with same value
-					//FIXME: temporary workaround for rendering bugs
-					//if(last == sample)
-					if((last == sample) && ((m + 3) < memdepth))
-						cap->m_durations[k]++;
-
-					//Nope, it toggled - store the new value
-					else
-					{
-						k++;
-						cap->m_offsets[k] = m;
-						cap->m_durations[k] = 1;
-						cap->m_samples[k] = sample;
-						last = sample;
-					}
+					k++;
+					cap->m_offsets[k] = m;
+					cap->m_durations[k] = 1;
+					cap->m_samples[k] = sample;
+					last = sample;
 				}
-
-				//Free space reclaimed by deduplication
-				cap->Resize(k);
-				cap->m_offsets.shrink_to_fit();
-				cap->m_durations.shrink_to_fit();
-				cap->m_samples.shrink_to_fit();
-				cap->MarkSamplesModifiedFromCpu();
-				cap->MarkTimestampsModifiedFromCpu();
 			}
 
-			delete[] buf;
+			//Free space reclaimed by deduplication
+			cap->Resize(k);
+			cap->m_offsets.shrink_to_fit();
+			cap->m_durations.shrink_to_fit();
+			cap->m_samples.shrink_to_fit();
+			cap->MarkSamplesModifiedFromCpu();
+			cap->MarkTimestampsModifiedFromCpu();
 		}
+
+		delete[] buf;
 	}
 
 	//If we have GPU support for int16, we can do the conversion on the card
@@ -792,85 +632,6 @@ void PicoLogicAnalyser::PushTrigger()
 	ClearPendingWaveforms();
 }
 
-vector<Oscilloscope::AnalogBank> PicoLogicAnalyser::GetAnalogBanks()
-{
-	vector<AnalogBank> banks;
-	banks.push_back(GetAnalogBank(0));
-	return banks;
-}
-
-Oscilloscope::AnalogBank PicoLogicAnalyser::GetAnalogBank(size_t /*channel*/)
-{
-	AnalogBank bank;
-	return bank;
-}
-
-bool PicoLogicAnalyser::IsADCModeConfigurable()
-{
-	switch(m_series)
-	{
-		case SERIES_3x0xD:
-		case SERIES_3x0xDMSO:
-			return false;
-
-		case SERIES_6x0xE:
-		case SERIES_6403E:
-			return false;
-
-		case SERIES_6x2xE:
-			return true;
-
-		default:
-			LogWarning("PicoLogicAnalyser::IsADCModeConfigurable: unknown series\n");
-			return false;
-	}
-}
-
-vector<string> PicoLogicAnalyser::GetADCModeNames(size_t /*channel*/)
-{
-	//All scopes with variable resolution start at 8 bit and go up from there
-	vector<string> ret;
-	ret.push_back("8 Bit");
-	if(Is10BitModeAvailable())
-	{
-		ret.push_back("10 Bit");
-		if(Is12BitModeAvailable())
-			ret.push_back("12 Bit");
-	}
-	return ret;
-}
-
-size_t PicoLogicAnalyser::GetADCMode(size_t /*channel*/)
-{
-	return m_adcMode;
-}
-
-void PicoLogicAnalyser::SetADCMode(size_t /*channel*/, size_t mode)
-{
-	m_adcMode = (ADCMode)mode;
-
-	lock_guard<recursive_mutex> lock(m_mutex);
-	switch(mode)
-	{
-		case ADC_MODE_8BIT:
-			m_transport->SendCommand("BITS 8");
-			break;
-
-		case ADC_MODE_10BIT:
-			m_transport->SendCommand("BITS 10");
-			break;
-
-		case ADC_MODE_12BIT:
-			m_transport->SendCommand("BITS 12");
-			break;
-
-		default:
-			LogWarning("PicoLogicAnalyser::SetADCMode requested invalid mode %zu, interpreting as 8 bit\n", mode);
-			m_adcMode = ADC_MODE_8BIT;
-			break;
-	}
-}
-
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Logic analyzer configuration
 
@@ -890,67 +651,6 @@ Oscilloscope::DigitalBank PicoLogicAnalyser::GetDigitalBank(size_t channel)
 {
 	DigitalBank ret;
 	ret.push_back(GetOscilloscopeChannel(channel));
-	return ret;
-}
-
-bool PicoLogicAnalyser::IsDigitalHysteresisConfigurable()
-{
-	return true;
-}
-
-bool PicoLogicAnalyser::IsDigitalThresholdConfigurable()
-{
-	return true;
-}
-
-float PicoLogicAnalyser::GetDigitalHysteresis(size_t channel)
-{
-	lock_guard<recursive_mutex> lock(m_cacheMutex);
-	return m_digitalHysteresis[channel];
-}
-
-float PicoLogicAnalyser::GetDigitalThreshold(size_t channel)
-{
-	lock_guard<recursive_mutex> lock(m_cacheMutex);
-	return m_digitalThresholds[channel];
-}
-
-void PicoLogicAnalyser::SetDigitalHysteresis(size_t channel, float level)
-{
-	{
-		lock_guard<recursive_mutex> lock(m_cacheMutex);
-		m_digitalHysteresis[channel] = level;
-	}
-
-	lock_guard<recursive_mutex> lock(m_mutex);
-	m_transport->SendCommand(GetOscilloscopeChannel(channel)->GetHwname() + ":HYS " + to_string(level * 1000));
-}
-
-void PicoLogicAnalyser::SetDigitalThreshold(size_t channel, float level)
-{
-	{
-		lock_guard<recursive_mutex> lock(m_cacheMutex);
-		m_digitalThresholds[channel] = level;
-	}
-
-	lock_guard<recursive_mutex> lock(m_mutex);
-	m_transport->SendCommand(GetOscilloscopeChannel(channel)->GetHwname() + ":THRESH " + to_string(level));
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Checking for validity of configurations
-
-/**
-	@brief Returns the total number of analog channels which are currently enabled
- */
-size_t PicoLogicAnalyser::GetEnabledAnalogChannelCount()
-{
-	size_t ret = 0;
-	for(size_t i = 0; i < m_analogChannelCount; i++)
-	{
-		if(IsChannelEnabled(i))
-			ret++;
-	}
 	return ret;
 }
 
@@ -989,27 +689,7 @@ size_t PicoLogicAnalyser::GetEnabledAnalogChannelCountRange(size_t start, size_t
  */
 bool PicoLogicAnalyser::IsDigitalPodPresent(size_t npod)
 {
-	{
-		lock_guard<recursive_mutex> lock(m_cacheMutex);
-		if(m_digitalBankPresent.find(npod) != m_digitalBankPresent.end())
-			return m_digitalBankPresent[npod];
-	}
-
-	lock_guard<recursive_mutex> lock(m_mutex);
-	m_transport->SendCommand(to_string(npod + 1) + "D:PRESENT?");
-	int present = stoi(m_transport->ReadReply());
-
-	lock_guard<recursive_mutex> lock2(m_cacheMutex);
-	if(present)
-	{
-		m_digitalBankPresent[npod] = true;
-		return true;
-	}
-	else
-	{
-		m_digitalBankPresent[npod] = false;
-		return false;
-	}
+	return true;
 }
 
 /**
@@ -1017,13 +697,7 @@ bool PicoLogicAnalyser::IsDigitalPodPresent(size_t npod)
  */
 bool PicoLogicAnalyser::IsDigitalPodActive(size_t npod)
 {
-	size_t base = m_digitalChannelBase + 8 * npod;
-	for(size_t i = 0; i < 8; i++)
-	{
-		if(IsChannelEnabled(base + i))
-			return true;
-	}
-	return false;
+	return true;
 }
 
 /**
@@ -1054,299 +728,7 @@ bool PicoLogicAnalyser::CanEnableChannel(size_t i)
 			return true;
 	}
 
-	//Fall back to the main path if we get here
-	switch(m_series)
-	{
-		case SERIES_3x0xD:
-		case SERIES_3x0xDMSO:
-			return CanEnableChannel6000Series8Bit(i);
-			break;
-
-		//6000 series
-		case SERIES_6403E:
-		case SERIES_6x0xE:
-		case SERIES_6x2xE:
-			switch(GetADCMode(0))
-			{
-				case ADC_MODE_8BIT:
-					return CanEnableChannel6000Series8Bit(i);
-
-				case ADC_MODE_10BIT:
-					return CanEnableChannel6000Series10Bit(i);
-
-				case ADC_MODE_12BIT:
-					return CanEnableChannel6000Series12Bit(i);
-
-				default:
-					break;
-			}
-		default:
-			break;
-	}
-
 	//When in doubt, assume all channels are available
 	LogWarning("PicoLogicAnalyser::CanEnableChannel: Unknown ADC mode\n");
 	return true;
-}
-
-/**
-	@brief Checks if we can enable a channel on a 6000 series scope configured for 8-bit ADC resolution
- */
-bool PicoLogicAnalyser::CanEnableChannel6000Series8Bit(size_t i)
-{
-	int64_t rate = GetSampleRate();
-	size_t EnabledChannelCount = GetEnabledAnalogChannelCount() + GetEnabledDigitalPodCount();
-
-	//5 Gsps is the most restrictive configuration.
-	if(rate >= RATE_5GSPS)
-	{
-		//If we already have too many channels/MSO pods active, we're out of RAM bandwidth.
-		if(EnabledChannelCount >= 2)
-			return false;
-
-		//6403E only allows *one* 5 Gsps channel
-		else if(m_series == SERIES_6403E)
-			return (EnabledChannelCount == 0);
-
-		//No banking restrictions for MSO pods if we have enough memory bandwidth
-		else if(IsChannelIndexDigital(i))
-			return true;
-
-		//On 8 channel scopes, we can use one channel from the left bank (ABCD) and one from the right (EFGH).
-		else if(m_analogChannelCount == 8)
-		{
-			//Can enable a left bank channel if there's none in use
-			if(i < 4)
-				return (GetEnabledAnalogChannelCountAToD() == 0);
-
-			//Can enable a right bank channel if there's none in use
-			else
-				return (GetEnabledAnalogChannelCountEToH() == 0);
-		}
-
-		//On 4 channel scopes, we can use one channel from the left bank (AB) and one from the right (CD)
-		else
-		{
-			//Can enable a left bank channel if there's none in use
-			if(i < 2)
-				return (GetEnabledAnalogChannelCountAToB() == 0);
-
-			//Can enable a right bank channel if there's none in use
-			else
-				return (GetEnabledAnalogChannelCountCToD() == 0);
-		}
-	}
-
-	//2.5 Gsps allows more stuff
-	else if(rate >= RATE_2P5GSPS)
-	{
-		//If we already have too many channels/MSO pods active, we're out of RAM bandwidth.
-		if(EnabledChannelCount >= 4)
-			return false;
-
-		//No banking restrictions for MSO pods if we have enough memory bandwidth
-		else if(IsChannelIndexDigital(i))
-			return true;
-
-		//6403E allows up to 2 channels, one AB and one CD
-		else if(m_series == SERIES_6403E)
-		{
-			//Can enable a left bank channel if there's none in use
-			if(i < 2)
-				return (GetEnabledAnalogChannelCountAToB() == 0);
-
-			//Can enable a right bank channel if there's none in use
-			else
-				return (GetEnabledAnalogChannelCountCToD() == 0);
-		}
-
-		//8 channel scopes allow up to 4 channels but only one from A/B, C/D, E/F, G/H
-		else if(m_analogChannelCount == 8)
-		{
-			if(i < 2)
-				return (GetEnabledAnalogChannelCountAToB() == 0);
-			else if(i < 4)
-				return (GetEnabledAnalogChannelCountCToD() == 0);
-			else if(i < 6)
-				return (GetEnabledAnalogChannelCountEToF() == 0);
-			else
-				return (GetEnabledAnalogChannelCountGToH() == 0);
-		}
-
-		//On 4 channel scopes, we can run everything at 2.5 Gsps
-		else
-			return true;
-	}
-
-	//1.25 Gsps - just RAM bandwidth check
-	else if((rate >= RATE_1P25GSPS) && (EnabledChannelCount <= 7))
-		return true;
-
-	//Slow enough that there's no capacity limits
-	else
-		return true;
-}
-
-/**
-	@brief Checks if we can enable a channel on a 6000 series scope configured for 10-bit ADC resolution
- */
-bool PicoLogicAnalyser::CanEnableChannel6000Series10Bit(size_t i)
-{
-	int64_t rate = GetSampleRate();
-	size_t EnabledChannelCount = GetEnabledAnalogChannelCount() + GetEnabledDigitalPodCount();
-
-	//5 Gsps is only allowed on a single channel/pod
-	if(rate >= RATE_5GSPS)
-		return (EnabledChannelCount == 0);
-
-	//2.5 Gsps is allowed up to two channels/pods
-	else if(rate >= RATE_2P5GSPS)
-	{
-		//Out of bandwidth
-		if(EnabledChannelCount >= 2)
-			return false;
-
-		//No banking restrictions on MSO pods
-		else if(IsChannelIndexDigital(i))
-			return true;
-
-		//8 channel scopes require the two channels to be in separate banks
-		else if(m_analogChannelCount == 8)
-		{
-			//Can enable a left bank channel if there's none in use
-			if(i < 4)
-				return (GetEnabledAnalogChannelCountAToD() == 0);
-
-			//Can enable a right bank channel if there's none in use
-			else
-				return (GetEnabledAnalogChannelCountEToH() == 0);
-		}
-
-		//No banking restrictions on 4 channel scopes
-		else
-			return true;
-	}
-
-	//1.25 Gsps is allowed up to 4 total channels/pods with no banking restrictions
-	else if(rate >= RATE_1P25GSPS)
-		return (EnabledChannelCount <= 3);
-
-	//625 Msps allowed up to 8 total channels/pods with no banking restrictions
-	else if(rate >= RATE_625MSPS)
-		return (EnabledChannelCount <= 7);
-
-	//Slow enough that there's no capacity limits
-	else
-		return true;
-}
-
-/**
-	@brief Checks if we can enable a channel on a 6000 series scope configured for 12-bit ADC resolution
- */
-bool PicoLogicAnalyser::CanEnableChannel6000Series12Bit(size_t i)
-{
-	int64_t rate = GetSampleRate();
-
-	//Too many channels enabled?
-	if(GetEnabledAnalogChannelCount() >= 2)
-		return false;
-
-	else if(rate > RATE_1P25GSPS)
-		return false;
-
-	//No banking restrictions on MSO pods
-	else if(IsChannelIndexDigital(i))
-		return true;
-
-	else if(m_analogChannelCount == 8)
-	{
-		//Can enable a left bank channel if there's none in use
-		if(i < 4)
-			return (GetEnabledAnalogChannelCountAToD() == 0);
-
-		//Can enable a right bank channel if there's none in use
-		else
-			return (GetEnabledAnalogChannelCountEToH() == 0);
-	}
-
-	else
-	{
-		//Can enable a left bank channel if there's none in use
-		if(i < 2)
-			return (GetEnabledAnalogChannelCountAToB() == 0);
-
-		//Can enable a right bank channel if there's none in use
-		else
-			return (GetEnabledAnalogChannelCountCToD() == 0);
-	}
-}
-
-bool PicoLogicAnalyser::Is10BitModeAvailable()
-{
-	//FlexRes only available on one series at the moment
-	if(m_series != SERIES_6x2xE)
-		return false;
-
-	int64_t rate = GetSampleRate();
-	size_t EnabledChannelCount = GetEnabledAnalogChannelCount() + GetEnabledDigitalPodCount();
-
-	//5 Gsps is easy, just a bandwidth cap
-	if(rate >= RATE_5GSPS)
-		return (EnabledChannelCount <= 1);
-
-	//2.5 Gsps has banking restrictions on 8 channel scopes
-	else if(rate >= RATE_2P5GSPS)
-	{
-		if(EnabledChannelCount > 2)
-			return false;
-
-		else if(m_analogChannelCount == 8)
-		{
-			if(GetEnabledAnalogChannelCountAToB() > 1)
-				return false;
-			else if(GetEnabledAnalogChannelCountCToD() > 1)
-				return false;
-			else if(GetEnabledAnalogChannelCountEToF() > 1)
-				return false;
-			else if(GetEnabledAnalogChannelCountGToH() > 1)
-				return false;
-			else
-				return true;
-		}
-
-		else
-			return true;
-	}
-
-	//1.25 Gsps and 625 Msps are just bandwidth caps
-	else if(rate >= RATE_1P25GSPS)
-		return (EnabledChannelCount <= 4);
-	else if(rate >= RATE_625MSPS)
-		return (EnabledChannelCount <= 8);
-
-	//No capacity limits
-	else
-		return true;
-}
-
-bool PicoLogicAnalyser::Is12BitModeAvailable()
-{
-	//FlexRes only available on one series at the moment
-	if(m_series != SERIES_6x2xE)
-		return false;
-
-	int64_t rate = GetSampleRate();
-
-	//12 bit mode only available at 1.25 Gsps and below
-	if(rate > RATE_1P25GSPS)
-		return false;
-
-	//1.25 Gsps and below have the same banking restrictions: at most one channel from the left and right half
-	else
-	{
-		if(m_analogChannelCount == 8)
-			return (GetEnabledAnalogChannelCountAToD() <= 1) && (GetEnabledAnalogChannelCountEToH() <= 1);
-		else
-			return (GetEnabledAnalogChannelCountAToB() <= 1) && (GetEnabledAnalogChannelCountCToD() <= 1);
-	}
 }
