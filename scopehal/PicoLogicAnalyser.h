@@ -27,29 +27,27 @@
 *                                                                                                                      *
 ***********************************************************************************************************************/
 
-#ifndef PicoOscilloscope_h
-#define PicoOscilloscope_h
+#ifndef PicoLogicAnalyser_h
+#define PicoLogicAnalyser_h
 
 class EdgeTrigger;
 
 #include "RemoteBridgeOscilloscope.h"
 
 /**
-	@brief PicoOscilloscope - driver for talking to the scopehal-pico-bridge daemons
+	@brief PicoLogicAnalyser - driver for talking to the scopehal-pico-bridge daemons
  */
-class PicoOscilloscope 	: public virtual RemoteBridgeOscilloscope
-						, public virtual SCPIFunctionGenerator
+class PicoLogicAnalyser : public virtual RemoteBridgeOscilloscope
 {
 public:
-	PicoOscilloscope(SCPITransport* transport);
-	virtual ~PicoOscilloscope();
+	PicoLogicAnalyser(SCPITransport* transport);
+	virtual ~PicoLogicAnalyser();
 
 	//not copyable or assignable
-	PicoOscilloscope(const PicoOscilloscope& rhs) =delete;
-	PicoOscilloscope& operator=(const PicoOscilloscope& rhs) =delete;
+	PicoLogicAnalyser(const PicoLogicAnalyser& rhs) = delete;
+	PicoLogicAnalyser& operator=(const PicoLogicAnalyser& rhs) = delete;
 
 public:
-
 	//Device information
 	virtual unsigned int GetInstrumentTypes() const override;
 	virtual uint32_t GetInstrumentTypesForChannel(size_t i) const override;
@@ -99,35 +97,6 @@ public:
 	virtual void SetADCMode(size_t channel, size_t mode) override;
 
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-	// Function generator
-
-	virtual std::vector<WaveShape> GetAvailableWaveformShapes(int chan) override;
-
-	//Configuration
-	virtual bool GetFunctionChannelActive(int chan) override;
-	virtual void SetFunctionChannelActive(int chan, bool on) override;
-
-	virtual float GetFunctionChannelDutyCycle(int chan) override;
-	virtual void SetFunctionChannelDutyCycle(int chan, float duty) override;
-
-	virtual float GetFunctionChannelAmplitude(int chan) override;
-	virtual void SetFunctionChannelAmplitude(int chan, float amplitude) override;
-
-	virtual float GetFunctionChannelOffset(int chan) override;
-	virtual void SetFunctionChannelOffset(int chan, float offset) override;
-
-	virtual float GetFunctionChannelFrequency(int chan) override;
-	virtual void SetFunctionChannelFrequency(int chan, float hz) override;
-
-	virtual WaveShape GetFunctionChannelShape(int chan) override;
-	virtual void SetFunctionChannelShape(int chan, WaveShape shape) override;
-
-	virtual bool HasFunctionRiseFallTimeControls(int chan) override;
-
-	virtual OutputImpedance GetFunctionChannelOutputImpedance(int chan) override;
-	virtual void SetFunctionChannelOutputImpedance(int chan, OutputImpedance z) override;
-
-	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	// Logic analyzer configuration
 
 	virtual std::vector<DigitalBank> GetDigitalBanks() override;
@@ -141,29 +110,27 @@ public:
 
 	enum Series
 	{
-		SERIES_3x0xD,   //3000 series (first x=2 or 4 Chan, 2nd x is BW)
-		SERIES_3x0xDMSO,//3000 series+16bits MSO(first x=2 or 4 Chan, 2nd x is BW)
-		SERIES_6403E,	//Lowest end 6000E model has less ADCs
-		SERIES_6x0xE,	//6000 series with 8 bit resolution only
-		SERIES_6x2xE,	//6000 series with FlexRes
+		SERIES_3x0xD,		//3000 series (first x=2 or 4 Chan, 2nd x is BW)
+		SERIES_3x0xDMSO,	//3000 series+16bits MSO(first x=2 or 4 Chan, 2nd x is BW)
+		SERIES_6403E,		//Lowest end 6000E model has less ADCs
+		SERIES_6x0xE,		//6000 series with 8 bit resolution only
+		SERIES_6x2xE,		//6000 series with FlexRes
 
-		SERIES_UNKNOWN	//unknown or invalid model name
+		SERIES_UNKNOWN	  //unknown or invalid model name
 	};
 
 	enum ADCMode
 	{
-		ADC_MODE_8BIT	= 0,
-		ADC_MODE_10BIT	= 1,
-		ADC_MODE_12BIT	= 2
+		ADC_MODE_8BIT = 0,
+		ADC_MODE_10BIT = 1,
+		ADC_MODE_12BIT = 2
 	};
 
 	bool IsDigitalPodPresent(size_t npod);
 	bool IsDigitalPodActive(size_t npod);
 	bool IsChannelIndexDigital(size_t i);
-	size_t GetDigitalPodIndex(size_t i)
-	{ return (i - m_digitalChannelBase) / 8; }
-	size_t GetDigitalLaneIndex(size_t i)
-	{ return (i - m_digitalChannelBase) % 8; }
+	size_t GetDigitalPodIndex(size_t i) { return (i - m_digitalChannelBase) / 8; }
+	size_t GetDigitalLaneIndex(size_t i) { return (i - m_digitalChannelBase) % 8; }
 
 protected:
 	void IdentifyHardware();
@@ -176,18 +143,12 @@ protected:
 
 	size_t GetEnabledAnalogChannelCountRange(size_t start, size_t end);
 
-	size_t GetEnabledAnalogChannelCountAToD()
-	{ return GetEnabledAnalogChannelCountRange(0, 3); }
-	size_t GetEnabledAnalogChannelCountEToH()
-	{ return GetEnabledAnalogChannelCountRange(4, 7); }
-	size_t GetEnabledAnalogChannelCountAToB()
-	{ return GetEnabledAnalogChannelCountRange(0, 1); }
-	size_t GetEnabledAnalogChannelCountCToD()
-	{ return GetEnabledAnalogChannelCountRange(2, 3); }
-	size_t GetEnabledAnalogChannelCountEToF()
-	{ return GetEnabledAnalogChannelCountRange(4, 5); }
-	size_t GetEnabledAnalogChannelCountGToH()
-	{ return GetEnabledAnalogChannelCountRange(6, 7); }
+	size_t GetEnabledAnalogChannelCountAToD() { return GetEnabledAnalogChannelCountRange(0, 3); }
+	size_t GetEnabledAnalogChannelCountEToH() { return GetEnabledAnalogChannelCountRange(4, 7); }
+	size_t GetEnabledAnalogChannelCountAToB() { return GetEnabledAnalogChannelCountRange(0, 1); }
+	size_t GetEnabledAnalogChannelCountCToD() { return GetEnabledAnalogChannelCountRange(2, 3); }
+	size_t GetEnabledAnalogChannelCountEToF() { return GetEnabledAnalogChannelCountRange(4, 5); }
+	size_t GetEnabledAnalogChannelCountGToH() { return GetEnabledAnalogChannelCountRange(6, 7); }
 
 	bool CanEnableChannel6000Series8Bit(size_t i);
 	bool CanEnableChannel6000Series10Bit(size_t i);
@@ -223,7 +184,7 @@ protected:
 	Series m_series;
 
 	///@brief Buffers for storing raw ADC samples before converting to fp32
-	std::vector<std::unique_ptr<AcceleratorBuffer<int16_t> > > m_analogRawWaveformBuffers;
+	std::vector<std::unique_ptr<AcceleratorBuffer<int16_t>>> m_analogRawWaveformBuffers;
 
 	//Vulkan waveform conversion
 	std::shared_ptr<QueueHandle> m_queue;
@@ -232,9 +193,8 @@ protected:
 	std::unique_ptr<ComputePipeline> m_conversionPipeline;
 
 public:
-
 	static std::string GetDriverNameInternal();
-	OSCILLOSCOPE_INITPROC(PicoOscilloscope)
+	OSCILLOSCOPE_INITPROC(PicoLogicAnalyser)
 };
 
 #endif

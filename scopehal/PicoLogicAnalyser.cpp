@@ -33,23 +33,21 @@
 #endif
 
 #include "scopehal.h"
-#include "PicoOscilloscope.h"
+#include "PicoLogicAnalyser.h"
 #include "EdgeTrigger.h"
 
 using namespace std;
 
-#define RATE_5GSPS		(INT64_C(5000) * INT64_C(1000) * INT64_C(1000))
-#define RATE_2P5GSPS	(INT64_C(2500) * INT64_C(1000) * INT64_C(1000))
-#define RATE_1P25GSPS	(INT64_C(1250) * INT64_C(1000) * INT64_C(1000))
-#define RATE_625MSPS	(INT64_C(625)  * INT64_C(1000) * INT64_C(1000))
+#define RATE_5GSPS (INT64_C(5000) * INT64_C(1000) * INT64_C(1000))
+#define RATE_2P5GSPS (INT64_C(2500) * INT64_C(1000) * INT64_C(1000))
+#define RATE_1P25GSPS (INT64_C(1250) * INT64_C(1000) * INT64_C(1000))
+#define RATE_625MSPS (INT64_C(625) * INT64_C(1000) * INT64_C(1000))
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //Construction / destruction
 
-PicoOscilloscope::PicoOscilloscope(SCPITransport* transport)
-	: SCPIDevice(transport)
-	, SCPIInstrument(transport)
-	, RemoteBridgeOscilloscope(transport)
+PicoLogicAnalyser::PicoLogicAnalyser(SCPITransport* transport)
+	: SCPIDevice(transport), SCPIInstrument(transport), RemoteBridgeOscilloscope(transport)
 {
 	//Set up initial cache configuration as "not valid" and let it populate as we go
 
@@ -66,8 +64,7 @@ PicoOscilloscope::PicoOscilloscope(SCPITransport* transport)
 		chname[0] += i;
 
 		//Create the channel
-		auto chan = new OscilloscopeChannel(
-			this,
+		auto chan = new OscilloscopeChannel(this,
 			chname,
 			GetChannelColor(i),
 			Unit(Unit::UNIT_FS),
@@ -80,13 +77,13 @@ PicoOscilloscope::PicoOscilloscope(SCPITransport* transport)
 		//Set initial configuration so we have a well-defined instrument state
 		m_channelAttenuations[i] = 1;
 		SetChannelCoupling(i, OscilloscopeChannel::COUPLE_DC_1M);
-		SetChannelOffset(i, 0,  0);
+		SetChannelOffset(i, 0, 0);
 		SetChannelVoltageRange(i, 0, 5);
 	}
 
 	//Add digital channels (named 1D0...7 and 2D0...7)
 	m_digitalChannelBase = m_analogChannelCount;
-	for(size_t i=0; i<m_digitalChannelCount; i++)
+	for(size_t i = 0; i < m_digitalChannelCount; i++)
 	{
 		//Hardware name of the channel
 		size_t ibank = i / 8;
@@ -97,8 +94,7 @@ PicoOscilloscope::PicoOscilloscope(SCPITransport* transport)
 
 		//Create the channel
 		size_t chnum = i + m_digitalChannelBase;
-		auto chan = new OscilloscopeChannel(
-			this,
+		auto chan = new OscilloscopeChannel(this,
 			chname,
 			GetChannelColor(ichan),
 			Unit(Unit::UNIT_FS),
@@ -139,42 +135,10 @@ PicoOscilloscope::PicoOscilloscope(SCPITransport* transport)
 			break;
 	}
 
-	//Set initial AWG configuration
-	switch(m_series)
-	{
-		//has function generator
-		case SERIES_3x0xD:
-		case SERIES_3x0xDMSO:
-		case SERIES_6403E:
-		case SERIES_6x0xE:
-		case SERIES_6x2xE:
-			SetFunctionChannelAmplitude(0, 0.1);
-			SetFunctionChannelShape(0, SHAPE_SQUARE);
-			SetFunctionChannelDutyCycle(0, 0.5);
-			SetFunctionChannelFrequency(0, 1e6);
-			SetFunctionChannelOffset(0, 0);
-			SetFunctionChannelOutputImpedance(0, IMPEDANCE_HIGH_Z);
-			SetFunctionChannelActive(0, false);
-			m_awgChannel = new FunctionGeneratorChannel(
-				this,
-				"AWG",
-				"#808080",
-				m_channels.size());
-			m_channels.push_back(m_awgChannel);
-
-			//Default to not showing in the filter graph to avoid clutter
-			m_awgChannel->m_visibilityMode = InstrumentChannel::VIS_HIDE;
-			break;
-
-		//no AWG
-		default:
-			m_awgChannel = nullptr;
-	}
+	m_awgChannel = nullptr;
 
 	//Add the external trigger input
-	m_extTrigChannel =
-		new OscilloscopeChannel(
-		this,
+	m_extTrigChannel = new OscilloscopeChannel(this,
 		"EX",
 		"#808080",
 		Unit(Unit::UNIT_FS),
@@ -194,50 +158,46 @@ PicoOscilloscope::PicoOscilloscope(SCPITransport* transport)
 	SetTriggerOffset(10 * 1000L * 1000L);
 
 	//Initialize waveform buffers
-	for(size_t i=0; i<m_analogChannelCount; i++)
+	for(size_t i = 0; i < m_analogChannelCount; i++)
 	{
-		m_analogRawWaveformBuffers.push_back(std::make_unique<AcceleratorBuffer<int16_t> >());
+		m_analogRawWaveformBuffers.push_back(std::make_unique<AcceleratorBuffer<int16_t>>());
 		m_analogRawWaveformBuffers[i]->SetCpuAccessHint(AcceleratorBuffer<int16_t>::HINT_LIKELY);
 		m_analogRawWaveformBuffers[i]->SetGpuAccessHint(AcceleratorBuffer<int16_t>::HINT_LIKELY);
 	}
 
 	//Create Vulkan objects for the waveform conversion
-	m_queue = g_vkQueueManager->GetComputeQueue("PicoOscilloscope.queue");
+	m_queue = g_vkQueueManager->GetComputeQueue("PicoLogicAnalyser.queue");
 	vk::CommandPoolCreateInfo poolInfo(
 		vk::CommandPoolCreateFlagBits::eTransient | vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
-		m_queue->m_family );
+		m_queue->m_family);
 	m_pool = make_unique<vk::raii::CommandPool>(*g_vkComputeDevice, poolInfo);
 
 	vk::CommandBufferAllocateInfo bufinfo(**m_pool, vk::CommandBufferLevel::ePrimary, 1);
-	m_cmdBuf = make_unique<vk::raii::CommandBuffer>(
-		std::move(vk::raii::CommandBuffers(*g_vkComputeDevice, bufinfo).front()));
+	m_cmdBuf =
+		make_unique<vk::raii::CommandBuffer>(std::move(vk::raii::CommandBuffers(*g_vkComputeDevice, bufinfo).front()));
 
 	if(g_hasDebugUtils)
 	{
-		string poolname = "PicoOscilloscope.pool";
-		string bufname = "PicoOscilloscope.cmdbuf";
+		string poolname = "PicoLogicAnalyser.pool";
+		string bufname = "PicoLogicAnalyser.cmdbuf";
 
-		g_vkComputeDevice->setDebugUtilsObjectNameEXT(
-			vk::DebugUtilsObjectNameInfoEXT(
-				vk::ObjectType::eCommandPool,
-				reinterpret_cast<uint64_t>(static_cast<VkCommandPool>(**m_pool)),
-				poolname.c_str()));
+		g_vkComputeDevice->setDebugUtilsObjectNameEXT(vk::DebugUtilsObjectNameInfoEXT(vk::ObjectType::eCommandPool,
+			reinterpret_cast<uint64_t>(static_cast<VkCommandPool>(**m_pool)),
+			poolname.c_str()));
 
-		g_vkComputeDevice->setDebugUtilsObjectNameEXT(
-			vk::DebugUtilsObjectNameInfoEXT(
-				vk::ObjectType::eCommandBuffer,
-				reinterpret_cast<uint64_t>(static_cast<VkCommandBuffer>(**m_cmdBuf)),
-				bufname.c_str()));
+		g_vkComputeDevice->setDebugUtilsObjectNameEXT(vk::DebugUtilsObjectNameInfoEXT(vk::ObjectType::eCommandBuffer,
+			reinterpret_cast<uint64_t>(static_cast<VkCommandBuffer>(**m_cmdBuf)),
+			bufname.c_str()));
 	}
 
-	m_conversionPipeline = make_unique<ComputePipeline>(
-			"shaders/Convert16BitSamples.spv", 2, sizeof(ConvertRawSamplesShaderArgs) );
+	m_conversionPipeline =
+		make_unique<ComputePipeline>("shaders/Convert16BitSamples.spv", 2, sizeof(ConvertRawSamplesShaderArgs));
 }
 
 /**
 	@brief Color the channels based on Pico's standard color sequence (blue-red-green-yellow-purple-gray-cyan-magenta)
  */
-string PicoOscilloscope::GetChannelColor(size_t i)
+string PicoLogicAnalyser::GetChannelColor(size_t i)
 {
 	switch(i % 8)
 	{
@@ -268,75 +228,26 @@ string PicoOscilloscope::GetChannelColor(size_t i)
 	}
 }
 
-void PicoOscilloscope::IdentifyHardware()
+void PicoLogicAnalyser::IdentifyHardware()
 {
 	//Assume no MSO channels to start
 	m_digitalChannelCount = 0;
 
-	//Figure out device family
-	if(m_model.length() < 5)
-	{
-		LogWarning("Unknown PicoScope model \"%s\"\n", m_model.c_str());
-		m_series = SERIES_UNKNOWN;
-	}
-	else if(m_model[0] == '3')
-	{
-		m_series = SERIES_3x0xD;
-		if(m_model.find("MSO") != string::npos)
-		{
-			// PicoScope3000 support 16 Digital Channels for MSO (or nothing)
-			m_digitalChannelCount = 16;
-			m_series = SERIES_3x0xDMSO;
-			LogWarning("SERIES_3x0xDMSO PicoScope model \"%s\"\n", m_model.c_str());
-		}
-		else
-		{
-			LogWarning("SERIES_3x0xD PicoScope model \"%s\"\n", m_model.c_str());
-		}
-	}
-	else if(m_model[0] == '6')
-	{
-		//We have two MSO pod connectors
-		m_digitalChannelCount = 16;
+	LogWarning("PicoScope model \"%s\"\n", m_model.c_str());
 
-		switch(m_model[2])
-		{
-			case '2':
-				m_series = SERIES_6x2xE;
-				break;
-
-			case '0':
-				if(m_model == "6403E")
-					m_series = SERIES_6403E;
-				else
-					m_series = SERIES_6x0xE;
-				break;
-
-			default:
-				LogWarning("Unknown PicoScope model \"%s\"\n", m_model.c_str());
-				m_series = SERIES_UNKNOWN;
-				break;
-		}
-	}
-	else
-	{
-		LogWarning("Unknown PicoScope model \"%s\"\n", m_model.c_str());
-		m_series = SERIES_UNKNOWN;
-	}
-
-	//Ask the scope how many channels it has
+	// Ask the scope how many channels it has
 	m_transport->SendCommand("CHANS?");
 	m_analogChannelCount = stoi(m_transport->ReadReply());
 }
 
-PicoOscilloscope::~PicoOscilloscope()
+PicoLogicAnalyser::~PicoLogicAnalyser()
 {
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //Accessors
 
-unsigned int PicoOscilloscope::GetInstrumentTypes() const
+unsigned int PicoLogicAnalyser::GetInstrumentTypes() const
 {
 	switch(m_series)
 	{
@@ -353,7 +264,7 @@ unsigned int PicoOscilloscope::GetInstrumentTypes() const
 	}
 }
 
-uint32_t PicoOscilloscope::GetInstrumentTypesForChannel(size_t i) const
+uint32_t PicoLogicAnalyser::GetInstrumentTypesForChannel(size_t i) const
 {
 	if(m_awgChannel && (m_awgChannel->GetIndex() == i))
 		return Instrument::INST_FUNCTION;
@@ -363,12 +274,12 @@ uint32_t PicoOscilloscope::GetInstrumentTypesForChannel(size_t i) const
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //Device interface functions
 
-string PicoOscilloscope::GetDriverNameInternal()
+string PicoLogicAnalyser::GetDriverNameInternal()
 {
-	return "pico";
+	return "picola";
 }
 
-void PicoOscilloscope::FlushConfigCache()
+void PicoLogicAnalyser::FlushConfigCache()
 {
 	lock_guard<recursive_mutex> lock(m_cacheMutex);
 
@@ -376,7 +287,7 @@ void PicoOscilloscope::FlushConfigCache()
 	m_digitalBankPresent.clear();
 }
 
-bool PicoOscilloscope::IsChannelEnabled(size_t i)
+bool PicoLogicAnalyser::IsChannelEnabled(size_t i)
 {
 	//ext trigger should never be displayed
 	if(i == m_extTrigChannel->GetIndex())
@@ -386,7 +297,7 @@ bool PicoOscilloscope::IsChannelEnabled(size_t i)
 	return m_channelsEnabled[i];
 }
 
-void PicoOscilloscope::EnableChannel(size_t i)
+void PicoLogicAnalyser::EnableChannel(size_t i)
 {
 	//If the pod is already active we don't have to touch anything scope side.
 	//Update the cache and we're done.
@@ -404,7 +315,7 @@ void PicoOscilloscope::EnableChannel(size_t i)
 	RemoteBridgeOscilloscope::EnableChannel(i);
 }
 
-void PicoOscilloscope::DisableChannel(size_t i)
+void PicoLogicAnalyser::DisableChannel(size_t i)
 {
 	{
 		lock_guard<recursive_mutex> lock(m_cacheMutex);
@@ -423,7 +334,7 @@ void PicoOscilloscope::DisableChannel(size_t i)
 	m_transport->SendCommand(":" + m_channels[i]->GetHwname() + ":OFF");
 }
 
-vector<OscilloscopeChannel::CouplingType> PicoOscilloscope::GetAvailableCouplings(size_t /*i*/)
+vector<OscilloscopeChannel::CouplingType> PicoLogicAnalyser::GetAvailableCouplings(size_t /*i*/)
 {
 	vector<OscilloscopeChannel::CouplingType> ret;
 	switch(m_series)
@@ -449,7 +360,7 @@ vector<OscilloscopeChannel::CouplingType> PicoOscilloscope::GetAvailableCoupling
 	return ret;
 }
 
-double PicoOscilloscope::GetChannelAttenuation(size_t i)
+double PicoLogicAnalyser::GetChannelAttenuation(size_t i)
 {
 	if(GetOscilloscopeChannel(i) == m_extTrigChannel)
 		return 1;
@@ -458,7 +369,7 @@ double PicoOscilloscope::GetChannelAttenuation(size_t i)
 	return m_channelAttenuations[i];
 }
 
-void PicoOscilloscope::SetChannelAttenuation(size_t i, double atten)
+void PicoLogicAnalyser::SetChannelAttenuation(size_t i, double atten)
 {
 	lock_guard<recursive_mutex> lock(m_cacheMutex);
 	double oldAtten = m_channelAttenuations[i];
@@ -470,31 +381,31 @@ void PicoOscilloscope::SetChannelAttenuation(size_t i, double atten)
 	m_channelOffsets[i] *= delta;
 }
 
-unsigned int PicoOscilloscope::GetChannelBandwidthLimit(size_t /*i*/)
+unsigned int PicoLogicAnalyser::GetChannelBandwidthLimit(size_t /*i*/)
 {
 	return 0;
 }
 
-void PicoOscilloscope::SetChannelBandwidthLimit(size_t /*i*/, unsigned int /*limit_mhz*/)
+void PicoLogicAnalyser::SetChannelBandwidthLimit(size_t /*i*/, unsigned int /*limit_mhz*/)
 {
 }
 
-OscilloscopeChannel* PicoOscilloscope::GetExternalTrigger()
+OscilloscopeChannel* PicoLogicAnalyser::GetExternalTrigger()
 {
 	//FIXME
 	return NULL;
 }
 
-Oscilloscope::TriggerMode PicoOscilloscope::PollTrigger()
+Oscilloscope::TriggerMode PicoLogicAnalyser::PollTrigger()
 {
 	//Always report "triggered" so we can block on AcquireData() in ScopeThread
 	//TODO: peek function of some sort?
 	return TRIGGER_MODE_TRIGGERED;
 }
 
-bool PicoOscilloscope::AcquireData()
+bool PicoLogicAnalyser::AcquireData()
 {
-	#pragma pack(push, 1)
+#pragma pack(push, 1)
 	struct
 	{
 		//Number of channels in the current waveform
@@ -504,7 +415,7 @@ bool PicoOscilloscope::AcquireData()
 		//May be different from m_srate if we changed the rate after the trigger was armed
 		int64_t fs_per_sample;
 	} wfmhdrs;
-	#pragma pack(pop)
+#pragma pack(pop)
 
 	//Read global waveform settings (independent of each channel)
 	if(!m_transport->ReadRawData(sizeof(wfmhdrs), (uint8_t*)&wfmhdrs))
@@ -526,7 +437,7 @@ bool PicoOscilloscope::AcquireData()
 	vector<float> scales;
 	vector<float> offsets;
 
-	for(size_t i=0; i<numChannels; i++)
+	for(size_t i = 0; i < numChannels; i++)
 	{
 		size_t tmp[2];
 
@@ -588,23 +499,23 @@ bool PicoOscilloscope::AcquireData()
 			size_t podnum = chnum - m_analogChannelCount;
 			if(podnum > 2)
 			{
-				LogError("Digital pod number was >2 (chnum = %zu). Possible protocol desync or data corruption?\n",
-						 chnum);
+				LogError(
+					"Digital pod number was >2 (chnum = %zu). Possible protocol desync or data corruption?\n", chnum);
 				return false;
 			}
 
 			//Create buffers for output waveforms
 			SparseDigitalWaveform* caps[8];
-			for(size_t j=0; j<8; j++)
+			for(size_t j = 0; j < 8; j++)
 			{
-				auto nchan = m_digitalChannelBase + 8*podnum + j;
+				auto nchan = m_digitalChannelBase + 8 * podnum + j;
 				caps[j] = AllocateDigitalWaveform(m_nickname + "." + GetOscilloscopeChannel(nchan)->GetHwname());
-				s[GetOscilloscopeChannel(nchan) ] = caps[j];
+				s[GetOscilloscopeChannel(nchan)] = caps[j];
 			}
 
-			//Now that we have the waveform data, unpack it into individual channels
-			#pragma omp parallel for
-			for(size_t j=0; j<8; j++)
+//Now that we have the waveform data, unpack it into individual channels
+#pragma omp parallel for
+			for(size_t j = 0; j < 8; j++)
 			{
 				//Bitmask for this digital channel
 				int16_t mask = (1 << j);
@@ -629,15 +540,15 @@ bool PicoOscilloscope::AcquireData()
 
 				//Read and de-duplicate the other samples
 				//TODO: can we vectorize this somehow?
-				for(size_t m=1; m<memdepth; m++)
+				for(size_t m = 1; m < memdepth; m++)
 				{
 					bool sample = (buf[m] & mask) ? true : false;
 
 					//Deduplicate consecutive samples with same value
 					//FIXME: temporary workaround for rendering bugs
 					//if(last == sample)
-					if( (last == sample) && ((m+3) < memdepth) )
-						cap->m_durations[k] ++;
+					if((last == sample) && ((m + 3) < memdepth))
+						cap->m_durations[k]++;
 
 					//Nope, it toggled - store the new value
 					else
@@ -674,7 +585,7 @@ bool PicoOscilloscope::AcquireData()
 
 		m_conversionPipeline->Bind(*m_cmdBuf);
 
-		for(size_t i=0; i<awfms.size(); i++)
+		for(size_t i = 0; i < awfms.size(); i++)
 		{
 			auto cap = awfms[i];
 
@@ -696,15 +607,14 @@ bool PicoOscilloscope::AcquireData()
 	}
 	else
 	{
-		//Fallback path
-		//Process analog captures in parallel
-		#pragma omp parallel for
-		for(size_t i=0; i<awfms.size(); i++)
+//Fallback path
+//Process analog captures in parallel
+#pragma omp parallel for
+		for(size_t i = 0; i < awfms.size(); i++)
 		{
 			auto cap = awfms[i];
 			cap->PrepareForCpuAccess();
-			Convert16BitSamples(
-				cap->m_samples.GetCpuPointer(),
+			Convert16BitSamples(cap->m_samples.GetCpuPointer(),
 				m_analogRawWaveformBuffers[achans[i]]->GetCpuPointer(),
 				scales[i],
 				-offsets[i],
@@ -726,17 +636,17 @@ bool PicoOscilloscope::AcquireData()
 	return true;
 }
 
-bool PicoOscilloscope::IsTriggerArmed()
+bool PicoLogicAnalyser::IsTriggerArmed()
 {
 	return m_triggerArmed;
 }
 
-bool PicoOscilloscope::CanInterleave()
+bool PicoLogicAnalyser::CanInterleave()
 {
 	return false;
 }
 
-vector<uint64_t> PicoOscilloscope::GetSampleRatesNonInterleaved()
+vector<uint64_t> PicoLogicAnalyser::GetSampleRatesNonInterleaved()
 {
 	vector<uint64_t> ret;
 
@@ -747,15 +657,15 @@ vector<uint64_t> PicoOscilloscope::GetSampleRatesNonInterleaved()
 		rates = m_transport->ReadReply();
 	}
 
-	size_t i=0;
+	size_t i = 0;
 	while(true)
 	{
 		size_t istart = i;
-		i = rates.find(',', i+1);
+		i = rates.find(',', i + 1);
 		if(i == string::npos)
 			break;
 
-		auto block = rates.substr(istart, i-istart);
+		auto block = rates.substr(istart, i - istart);
 		uint64_t fs = stoull(block);
 		auto hz = FS_PER_SECOND / fs;
 		ret.push_back(hz);
@@ -767,21 +677,21 @@ vector<uint64_t> PicoOscilloscope::GetSampleRatesNonInterleaved()
 	return ret;
 }
 
-vector<uint64_t> PicoOscilloscope::GetSampleRatesInterleaved()
+vector<uint64_t> PicoLogicAnalyser::GetSampleRatesInterleaved()
 {
 	//interleaving not supported
 	vector<uint64_t> ret = {};
 	return ret;
 }
 
-set<Oscilloscope::InterleaveConflict> PicoOscilloscope::GetInterleaveConflicts()
+set<Oscilloscope::InterleaveConflict> PicoLogicAnalyser::GetInterleaveConflicts()
 {
 	//interleaving not supported
 	set<Oscilloscope::InterleaveConflict> ret;
 	return ret;
 }
 
-vector<uint64_t> PicoOscilloscope::GetSampleDepthsNonInterleaved()
+vector<uint64_t> PicoLogicAnalyser::GetSampleDepthsNonInterleaved()
 {
 	vector<uint64_t> ret;
 
@@ -792,15 +702,15 @@ vector<uint64_t> PicoOscilloscope::GetSampleDepthsNonInterleaved()
 		depths = m_transport->ReadReply();
 	}
 
-	size_t i=0;
+	size_t i = 0;
 	while(true)
 	{
 		size_t istart = i;
-		i = depths.find(',', i+1);
+		i = depths.find(',', i + 1);
 		if(i == string::npos)
 			break;
 
-		uint64_t sampleDepth = stoull(depths.substr(istart, i-istart));
+		uint64_t sampleDepth = stoull(depths.substr(istart, i - istart));
 		ret.push_back(sampleDepth);
 
 		//skip the comma
@@ -810,39 +720,39 @@ vector<uint64_t> PicoOscilloscope::GetSampleDepthsNonInterleaved()
 	return ret;
 }
 
-vector<uint64_t> PicoOscilloscope::GetSampleDepthsInterleaved()
+vector<uint64_t> PicoLogicAnalyser::GetSampleDepthsInterleaved()
 {
 	//interleaving not supported
 	vector<uint64_t> ret;
 	return ret;
 }
 
-uint64_t PicoOscilloscope::GetSampleRate()
+uint64_t PicoLogicAnalyser::GetSampleRate()
 {
 	return m_srate;
 }
 
-uint64_t PicoOscilloscope::GetSampleDepth()
+uint64_t PicoLogicAnalyser::GetSampleDepth()
 {
 	return m_mdepth;
 }
 
-void PicoOscilloscope::SetSampleDepth(uint64_t depth)
+void PicoLogicAnalyser::SetSampleDepth(uint64_t depth)
 {
 	lock_guard<recursive_mutex> lock(m_mutex);
 	m_transport->SendCommand(string("DEPTH ") + to_string(depth));
 	m_mdepth = depth;
 }
 
-void PicoOscilloscope::SetSampleRate(uint64_t rate)
+void PicoLogicAnalyser::SetSampleRate(uint64_t rate)
 {
 	m_srate = rate;
 
 	lock_guard<recursive_mutex> lock(m_mutex);
-	m_transport->SendCommand( string("RATE ") + to_string(rate));
+	m_transport->SendCommand(string("RATE ") + to_string(rate));
 }
 
-void PicoOscilloscope::SetTriggerOffset(int64_t offset)
+void PicoLogicAnalyser::SetTriggerOffset(int64_t offset)
 {
 	lock_guard<recursive_mutex> lock(m_mutex);
 
@@ -853,24 +763,24 @@ void PicoOscilloscope::SetTriggerOffset(int64_t offset)
 	PushTrigger();
 }
 
-int64_t PicoOscilloscope::GetTriggerOffset()
+int64_t PicoLogicAnalyser::GetTriggerOffset()
 {
 	return m_triggerOffset;
 }
 
-bool PicoOscilloscope::IsInterleaving()
+bool PicoLogicAnalyser::IsInterleaving()
 {
 	//interleaving is done automatically in hardware based on sample rate, no user facing switch for it
 	return false;
 }
 
-bool PicoOscilloscope::SetInterleaving(bool /*combine*/)
+bool PicoLogicAnalyser::SetInterleaving(bool /*combine*/)
 {
 	//interleaving is done automatically in hardware based on sample rate, no user facing switch for it
 	return false;
 }
 
-void PicoOscilloscope::PushTrigger()
+void PicoLogicAnalyser::PushTrigger()
 {
 	auto et = dynamic_cast<EdgeTrigger*>(m_trigger);
 	if(et)
@@ -882,20 +792,20 @@ void PicoOscilloscope::PushTrigger()
 	ClearPendingWaveforms();
 }
 
-vector<Oscilloscope::AnalogBank> PicoOscilloscope::GetAnalogBanks()
+vector<Oscilloscope::AnalogBank> PicoLogicAnalyser::GetAnalogBanks()
 {
 	vector<AnalogBank> banks;
 	banks.push_back(GetAnalogBank(0));
 	return banks;
 }
 
-Oscilloscope::AnalogBank PicoOscilloscope::GetAnalogBank(size_t /*channel*/)
+Oscilloscope::AnalogBank PicoLogicAnalyser::GetAnalogBank(size_t /*channel*/)
 {
 	AnalogBank bank;
 	return bank;
 }
 
-bool PicoOscilloscope::IsADCModeConfigurable()
+bool PicoLogicAnalyser::IsADCModeConfigurable()
 {
 	switch(m_series)
 	{
@@ -911,12 +821,12 @@ bool PicoOscilloscope::IsADCModeConfigurable()
 			return true;
 
 		default:
-			LogWarning("PicoOscilloscope::IsADCModeConfigurable: unknown series\n");
+			LogWarning("PicoLogicAnalyser::IsADCModeConfigurable: unknown series\n");
 			return false;
 	}
 }
 
-vector<string> PicoOscilloscope::GetADCModeNames(size_t /*channel*/)
+vector<string> PicoLogicAnalyser::GetADCModeNames(size_t /*channel*/)
 {
 	//All scopes with variable resolution start at 8 bit and go up from there
 	vector<string> ret;
@@ -930,12 +840,12 @@ vector<string> PicoOscilloscope::GetADCModeNames(size_t /*channel*/)
 	return ret;
 }
 
-size_t PicoOscilloscope::GetADCMode(size_t /*channel*/)
+size_t PicoLogicAnalyser::GetADCMode(size_t /*channel*/)
 {
 	return m_adcMode;
 }
 
-void PicoOscilloscope::SetADCMode(size_t /*channel*/, size_t mode)
+void PicoLogicAnalyser::SetADCMode(size_t /*channel*/, size_t mode)
 {
 	m_adcMode = (ADCMode)mode;
 
@@ -955,7 +865,7 @@ void PicoOscilloscope::SetADCMode(size_t /*channel*/, size_t mode)
 			break;
 
 		default:
-			LogWarning("PicoOscilloscope::SetADCMode requested invalid mode %zu, interpreting as 8 bit\n", mode);
+			LogWarning("PicoLogicAnalyser::SetADCMode requested invalid mode %zu, interpreting as 8 bit\n", mode);
 			m_adcMode = ADC_MODE_8BIT;
 			break;
 	}
@@ -964,10 +874,10 @@ void PicoOscilloscope::SetADCMode(size_t /*channel*/, size_t mode)
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Logic analyzer configuration
 
-vector<Oscilloscope::DigitalBank> PicoOscilloscope::GetDigitalBanks()
+vector<Oscilloscope::DigitalBank> PicoLogicAnalyser::GetDigitalBanks()
 {
 	vector<DigitalBank> banks;
-	for(size_t i=0; i<m_digitalChannelCount; i++)
+	for(size_t i = 0; i < m_digitalChannelCount; i++)
 	{
 		DigitalBank bank;
 		bank.push_back(GetOscilloscopeChannel(m_digitalChannelBase + i));
@@ -976,36 +886,36 @@ vector<Oscilloscope::DigitalBank> PicoOscilloscope::GetDigitalBanks()
 	return banks;
 }
 
-Oscilloscope::DigitalBank PicoOscilloscope::GetDigitalBank(size_t channel)
+Oscilloscope::DigitalBank PicoLogicAnalyser::GetDigitalBank(size_t channel)
 {
 	DigitalBank ret;
 	ret.push_back(GetOscilloscopeChannel(channel));
 	return ret;
 }
 
-bool PicoOscilloscope::IsDigitalHysteresisConfigurable()
+bool PicoLogicAnalyser::IsDigitalHysteresisConfigurable()
 {
 	return true;
 }
 
-bool PicoOscilloscope::IsDigitalThresholdConfigurable()
+bool PicoLogicAnalyser::IsDigitalThresholdConfigurable()
 {
 	return true;
 }
 
-float PicoOscilloscope::GetDigitalHysteresis(size_t channel)
+float PicoLogicAnalyser::GetDigitalHysteresis(size_t channel)
 {
 	lock_guard<recursive_mutex> lock(m_cacheMutex);
 	return m_digitalHysteresis[channel];
 }
 
-float PicoOscilloscope::GetDigitalThreshold(size_t channel)
+float PicoLogicAnalyser::GetDigitalThreshold(size_t channel)
 {
 	lock_guard<recursive_mutex> lock(m_cacheMutex);
 	return m_digitalThresholds[channel];
 }
 
-void PicoOscilloscope::SetDigitalHysteresis(size_t channel, float level)
+void PicoLogicAnalyser::SetDigitalHysteresis(size_t channel, float level)
 {
 	{
 		lock_guard<recursive_mutex> lock(m_cacheMutex);
@@ -1016,7 +926,7 @@ void PicoOscilloscope::SetDigitalHysteresis(size_t channel, float level)
 	m_transport->SendCommand(GetOscilloscopeChannel(channel)->GetHwname() + ":HYS " + to_string(level * 1000));
 }
 
-void PicoOscilloscope::SetDigitalThreshold(size_t channel, float level)
+void PicoLogicAnalyser::SetDigitalThreshold(size_t channel, float level)
 {
 	{
 		lock_guard<recursive_mutex> lock(m_cacheMutex);
@@ -1033,13 +943,13 @@ void PicoOscilloscope::SetDigitalThreshold(size_t channel, float level)
 /**
 	@brief Returns the total number of analog channels which are currently enabled
  */
-size_t PicoOscilloscope::GetEnabledAnalogChannelCount()
+size_t PicoLogicAnalyser::GetEnabledAnalogChannelCount()
 {
 	size_t ret = 0;
-	for(size_t i=0; i<m_analogChannelCount; i++)
+	for(size_t i = 0; i < m_analogChannelCount; i++)
 	{
 		if(IsChannelEnabled(i))
-			ret ++;
+			ret++;
 	}
 	return ret;
 }
@@ -1047,7 +957,7 @@ size_t PicoOscilloscope::GetEnabledAnalogChannelCount()
 /**
 	@brief Returns the total number of 8-bit MSO pods which are currently enabled
  */
-size_t PicoOscilloscope::GetEnabledDigitalPodCount()
+size_t PicoLogicAnalyser::GetEnabledDigitalPodCount()
 {
 	size_t n = 0;
 	if(IsDigitalPodActive(0))
@@ -1060,7 +970,7 @@ size_t PicoOscilloscope::GetEnabledDigitalPodCount()
 /**
 	@brief Returns the total number of analog channels in the requested range which are currently enabled
  */
-size_t PicoOscilloscope::GetEnabledAnalogChannelCountRange(size_t start, size_t end)
+size_t PicoLogicAnalyser::GetEnabledAnalogChannelCountRange(size_t start, size_t end)
 {
 	if(end >= m_analogChannelCount)
 		end = m_analogChannelCount - 1;
@@ -1069,7 +979,7 @@ size_t PicoOscilloscope::GetEnabledAnalogChannelCountRange(size_t start, size_t 
 	for(size_t i = start; i <= end; i++)
 	{
 		if(IsChannelEnabled(i))
-			n ++;
+			n++;
 	}
 	return n;
 }
@@ -1077,7 +987,7 @@ size_t PicoOscilloscope::GetEnabledAnalogChannelCountRange(size_t start, size_t 
 /**
 	@brief Check if a MSO pod is present
  */
-bool PicoOscilloscope::IsDigitalPodPresent(size_t npod)
+bool PicoLogicAnalyser::IsDigitalPodPresent(size_t npod)
 {
 	{
 		lock_guard<recursive_mutex> lock(m_cacheMutex);
@@ -1105,12 +1015,12 @@ bool PicoOscilloscope::IsDigitalPodPresent(size_t npod)
 /**
 	@brief Check if any channels in an MSO pod are enabled
  */
-bool PicoOscilloscope::IsDigitalPodActive(size_t npod)
+bool PicoLogicAnalyser::IsDigitalPodActive(size_t npod)
 {
-	size_t base = m_digitalChannelBase + 8*npod;
-	for(size_t i=0; i<8; i++)
+	size_t base = m_digitalChannelBase + 8 * npod;
+	for(size_t i = 0; i < 8; i++)
 	{
-		if(IsChannelEnabled(base+i))
+		if(IsChannelEnabled(base + i))
 			return true;
 	}
 	return false;
@@ -1119,12 +1029,12 @@ bool PicoOscilloscope::IsDigitalPodActive(size_t npod)
 /**
 	@brief Checks if a channel index refers to a MSO channel
  */
-bool PicoOscilloscope::IsChannelIndexDigital(size_t i)
+bool PicoLogicAnalyser::IsChannelIndexDigital(size_t i)
 {
 	return (i >= m_digitalChannelBase) && (i < m_digitalChannelBase + m_digitalChannelCount);
 }
 
-bool PicoOscilloscope::CanEnableChannel(size_t i)
+bool PicoLogicAnalyser::CanEnableChannel(size_t i)
 {
 	//If channel is already on, of course it can stay on
 	if(IsChannelEnabled(i))
@@ -1175,14 +1085,14 @@ bool PicoOscilloscope::CanEnableChannel(size_t i)
 	}
 
 	//When in doubt, assume all channels are available
-	LogWarning("PicoOscilloscope::CanEnableChannel: Unknown ADC mode\n");
+	LogWarning("PicoLogicAnalyser::CanEnableChannel: Unknown ADC mode\n");
 	return true;
 }
 
 /**
 	@brief Checks if we can enable a channel on a 6000 series scope configured for 8-bit ADC resolution
  */
-bool PicoOscilloscope::CanEnableChannel6000Series8Bit(size_t i)
+bool PicoLogicAnalyser::CanEnableChannel6000Series8Bit(size_t i)
 {
 	int64_t rate = GetSampleRate();
 	size_t EnabledChannelCount = GetEnabledAnalogChannelCount() + GetEnabledDigitalPodCount();
@@ -1269,7 +1179,7 @@ bool PicoOscilloscope::CanEnableChannel6000Series8Bit(size_t i)
 	}
 
 	//1.25 Gsps - just RAM bandwidth check
-	else if( (rate >= RATE_1P25GSPS) && (EnabledChannelCount <= 7) )
+	else if((rate >= RATE_1P25GSPS) && (EnabledChannelCount <= 7))
 		return true;
 
 	//Slow enough that there's no capacity limits
@@ -1280,7 +1190,7 @@ bool PicoOscilloscope::CanEnableChannel6000Series8Bit(size_t i)
 /**
 	@brief Checks if we can enable a channel on a 6000 series scope configured for 10-bit ADC resolution
  */
-bool PicoOscilloscope::CanEnableChannel6000Series10Bit(size_t i)
+bool PicoLogicAnalyser::CanEnableChannel6000Series10Bit(size_t i)
 {
 	int64_t rate = GetSampleRate();
 	size_t EnabledChannelCount = GetEnabledAnalogChannelCount() + GetEnabledDigitalPodCount();
@@ -1333,7 +1243,7 @@ bool PicoOscilloscope::CanEnableChannel6000Series10Bit(size_t i)
 /**
 	@brief Checks if we can enable a channel on a 6000 series scope configured for 12-bit ADC resolution
  */
-bool PicoOscilloscope::CanEnableChannel6000Series12Bit(size_t i)
+bool PicoLogicAnalyser::CanEnableChannel6000Series12Bit(size_t i)
 {
 	int64_t rate = GetSampleRate();
 
@@ -1371,7 +1281,7 @@ bool PicoOscilloscope::CanEnableChannel6000Series12Bit(size_t i)
 	}
 }
 
-bool PicoOscilloscope::Is10BitModeAvailable()
+bool PicoLogicAnalyser::Is10BitModeAvailable()
 {
 	//FlexRes only available on one series at the moment
 	if(m_series != SERIES_6x2xE)
@@ -1419,7 +1329,7 @@ bool PicoOscilloscope::Is10BitModeAvailable()
 		return true;
 }
 
-bool PicoOscilloscope::Is12BitModeAvailable()
+bool PicoLogicAnalyser::Is12BitModeAvailable()
 {
 	//FlexRes only available on one series at the moment
 	if(m_series != SERIES_6x2xE)
@@ -1439,187 +1349,4 @@ bool PicoOscilloscope::Is12BitModeAvailable()
 		else
 			return (GetEnabledAnalogChannelCountAToB() <= 1) && (GetEnabledAnalogChannelCountCToD() <= 1);
 	}
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Function generator
-
-vector<FunctionGenerator::WaveShape> PicoOscilloscope::GetAvailableWaveformShapes(int /*chan*/)
-{
-	vector<WaveShape> ret;
-	ret.push_back(FunctionGenerator::SHAPE_SINE);
-	ret.push_back(FunctionGenerator::SHAPE_SQUARE);
-	ret.push_back(FunctionGenerator::SHAPE_TRIANGLE);
-	ret.push_back(FunctionGenerator::SHAPE_DC);
-	ret.push_back(FunctionGenerator::SHAPE_NOISE);
-	ret.push_back(FunctionGenerator::SHAPE_SAWTOOTH_UP);
-	ret.push_back(FunctionGenerator::SHAPE_SAWTOOTH_DOWN);
-	ret.push_back(FunctionGenerator::SHAPE_SINC);
-	ret.push_back(FunctionGenerator::SHAPE_GAUSSIAN);
-	ret.push_back(FunctionGenerator::SHAPE_HALF_SINE);
-	ret.push_back(FunctionGenerator::SHAPE_PRBS_NONSTANDARD);
-	return ret;
-}
-
-bool PicoOscilloscope::GetFunctionChannelActive(int /*chan*/)
-{
-	return m_awgEnabled;
-}
-
-void PicoOscilloscope::SetFunctionChannelActive(int /*chan*/, bool on)
-{
-	m_awgEnabled = on;
-
-	lock_guard<recursive_mutex> lock(m_mutex);
-	if(on)
-		m_transport->SendCommand("AWG:START");
-	else
-		m_transport->SendCommand("AWG:STOP");
-}
-
-float PicoOscilloscope::GetFunctionChannelDutyCycle(int /*chan*/)
-{
-	return m_awgDutyCycle;
-}
-
-void PicoOscilloscope::SetFunctionChannelDutyCycle(int /*chan*/, float duty)
-{
-	m_awgDutyCycle = duty;
-
-	lock_guard<recursive_mutex> lock(m_mutex);
-	m_transport->SendCommand(string("AWG:DUTY ") + to_string(duty));
-}
-
-float PicoOscilloscope::GetFunctionChannelAmplitude(int /*chan*/)
-{
-	return m_awgRange;
-}
-
-void PicoOscilloscope::SetFunctionChannelAmplitude(int /*chan*/, float amplitude)
-{
-	m_awgRange = amplitude;
-
-	//Rescale if load is not high-Z
-	if(m_awgImpedance == IMPEDANCE_50_OHM)
-		amplitude *= 2;
-
-	lock_guard<recursive_mutex> lock(m_mutex);
-	m_transport->SendCommand(string("AWG:RANGE ") + to_string(amplitude));
-}
-
-float PicoOscilloscope::GetFunctionChannelOffset(int /*chan*/)
-{
-	return m_awgOffset;
-}
-
-void PicoOscilloscope::SetFunctionChannelOffset(int /*chan*/, float offset)
-{
-	m_awgOffset = offset;
-
-	//Rescale if load is not high-Z
-	if(m_awgImpedance == IMPEDANCE_50_OHM)
-		offset *= 2;
-
-	lock_guard<recursive_mutex> lock(m_mutex);
-	m_transport->SendCommand(string("AWG:OFFS ") + to_string(offset));
-}
-
-float PicoOscilloscope::GetFunctionChannelFrequency(int /*chan*/)
-{
-	return m_awgFrequency;
-}
-
-void PicoOscilloscope::SetFunctionChannelFrequency(int /*chan*/, float hz)
-{
-	m_awgFrequency = hz;
-
-	lock_guard<recursive_mutex> lock(m_mutex);
-	m_transport->SendCommand(string("AWG:FREQ ") + to_string(hz));
-}
-
-FunctionGenerator::WaveShape PicoOscilloscope::GetFunctionChannelShape(int /*chan*/)
-{
-	return m_awgShape;
-}
-
-void PicoOscilloscope::SetFunctionChannelShape(int /*chan*/, WaveShape shape)
-{
-	m_awgShape = shape;
-
-	lock_guard<recursive_mutex> lock(m_mutex);
-	switch(shape)
-	{
-		case SHAPE_SINE:
-			m_transport->SendCommand(string("AWG:SHAPE SINE"));
-			break;
-
-		case SHAPE_SQUARE:
-			m_transport->SendCommand(string("AWG:SHAPE SQUARE"));
-			break;
-
-		case SHAPE_TRIANGLE:
-			m_transport->SendCommand(string("AWG:SHAPE TRIANGLE"));
-			break;
-
-		case SHAPE_DC:
-			m_transport->SendCommand(string("AWG:SHAPE DC"));
-			break;
-
-		case SHAPE_NOISE:
-			m_transport->SendCommand(string("AWG:SHAPE WHITENOISE"));
-			break;
-
-		case SHAPE_SAWTOOTH_UP:
-			m_transport->SendCommand(string("AWG:SHAPE RAMP_UP"));
-			break;
-
-		case SHAPE_SAWTOOTH_DOWN:
-			m_transport->SendCommand(string("AWG:SHAPE RAMP_DOWN"));
-			break;
-
-		case SHAPE_SINC:
-			m_transport->SendCommand(string("AWG:SHAPE SINC"));
-			break;
-
-		case SHAPE_GAUSSIAN:
-			m_transport->SendCommand(string("AWG:SHAPE GAUSSIAN"));
-			break;
-
-		case SHAPE_HALF_SINE:
-			m_transport->SendCommand(string("AWG:SHAPE HALF_SINE"));
-			break;
-
-		case SHAPE_PRBS_NONSTANDARD:
-			m_transport->SendCommand(string("AWG:SHAPE PRBS"));
-			//per Martyn at Pico:
-			//lfsr42 <= lfsr42(lfsr42'HIGH - 1 downto 0) & (lfsr42(41) xnor lfsr42(40)
-			//xnor lfsr42(19) xnor lfsr42(18));
-			break;
-
-		default:
-			break;
-	}
-}
-
-bool PicoOscilloscope::HasFunctionRiseFallTimeControls(int /*chan*/)
-{
-	return false;
-}
-
-FunctionGenerator::OutputImpedance PicoOscilloscope::GetFunctionChannelOutputImpedance(int /*chan*/)
-{
-	return m_awgImpedance;
-}
-
-void PicoOscilloscope::SetFunctionChannelOutputImpedance(int chan, OutputImpedance z)
-{
-	//Save old offset/amplitude
-	float off = GetFunctionChannelOffset(chan);
-	float amp = GetFunctionChannelAmplitude(chan);
-
-	m_awgImpedance = z;
-
-	//Restore with new impedance
-	SetFunctionChannelAmplitude(chan, amp);
-	SetFunctionChannelOffset(chan, off);
 }
