@@ -48,25 +48,20 @@ PicoLogicAnalyser::PicoLogicAnalyser(SCPITransport* transport)
 	IdentifyHardware();
 
 	//Add digital channels (named 1D0...7 and 2D0...7)
-	m_digitalChannelBase = 0;
 	for(size_t i = 0; i < m_digitalChannelCount; i++)
 	{
-		//Hardware name of the channel
-		size_t ibank = i / 8;
-		size_t ichan = i % 8;
-		string chname = "1D0";
-		chname[0] += ibank;
-		chname[2] += ichan;
+		size_t ichan = i;
+		string chname = "D";
+		chname += std::to_string(i);
 
 		//Create the channel
-		size_t chnum = i + m_digitalChannelBase;
 		auto chan = new OscilloscopeChannel(this,
 			chname,
 			GetChannelColor(ichan),
 			Unit(Unit::UNIT_FS),
 			Unit(Unit::UNIT_COUNTS),
 			Stream::STREAM_TYPE_DIGITAL,
-			chnum);
+			i);
 		m_channels.push_back(chan);
 		chan->SetDefaultDisplayName();
 	}
@@ -190,27 +185,16 @@ void PicoLogicAnalyser::FlushConfigCache()
 
 bool PicoLogicAnalyser::IsChannelEnabled(size_t i)
 {
-	//ext trigger should never be displayed
-	if(i == m_extTrigChannel->GetIndex())
-		return false;
-
 	lock_guard<recursive_mutex> lock(m_cacheMutex);
 	return m_channelsEnabled[i];
 }
 
 void PicoLogicAnalyser::EnableChannel(size_t i)
 {
-	//If the pod is already active we don't have to touch anything scope side.
-	//Update the cache and we're done.
-	if(IsChannelIndexDigital(i))
 	{
-		size_t npod = GetDigitalPodIndex(i);
-		if(IsDigitalPodActive(npod))
-		{
-			lock_guard<recursive_mutex> lock(m_cacheMutex);
-			m_channelsEnabled[i] = true;
-			return;
-		}
+		lock_guard<recursive_mutex> lock(m_cacheMutex);
+		m_channelsEnabled[i] = true;
+		return;
 	}
 
 	RemoteBridgeOscilloscope::EnableChannel(i);
@@ -221,14 +205,6 @@ void PicoLogicAnalyser::DisableChannel(size_t i)
 	{
 		lock_guard<recursive_mutex> lock(m_cacheMutex);
 		m_channelsEnabled[i] = false;
-	}
-
-	//If the pod still has active channels after turning this one off, we don't have to touch anything scope side.
-	if(IsChannelIndexDigital(i))
-	{
-		size_t npod = GetDigitalPodIndex(i);
-		if(IsDigitalPodActive(npod))
-			return;
 	}
 
 	lock_guard<recursive_mutex> lock(m_mutex);
@@ -306,18 +282,11 @@ bool PicoLogicAnalyser::AcquireData()
 	int64_t fs_per_sample = wfmhdrs.fs_per_sample;
 
 	//Acquire data for each channel
-	size_t chnum;
 	size_t memdepth;
 	float config[3];
 	SequenceSet s;
 	double t = GetTime();
 	int64_t fs = (t - floor(t)) * FS_PER_SECOND;
-
-	//Analog channels get processed separately
-	vector<UniformAnalogWaveform*> awfms;
-	vector<size_t> achans;
-	vector<float> scales;
-	vector<float> offsets;
 
 	for(size_t i = 0; i < numChannels; i++)
 	{
@@ -326,7 +295,6 @@ bool PicoLogicAnalyser::AcquireData()
 		//Get channel ID and memory depth (samples, not bytes)
 		if(!m_transport->ReadRawData(sizeof(tmp), (uint8_t*)&tmp))
 			return false;
-		chnum = tmp[0];
 		memdepth = tmp[1];
 
 		int16_t* buf = new int16_t[memdepth];
@@ -338,18 +306,11 @@ bool PicoLogicAnalyser::AcquireData()
 		if(!m_transport->ReadRawData(memdepth * sizeof(int16_t), (uint8_t*)buf))
 			return false;
 
-		size_t podnum = chnum - m_analogChannelCount;
-		if(podnum > 2)
-		{
-			LogError("Digital pod number was >2 (chnum = %zu). Possible protocol desync or data corruption?\n", chnum);
-			return false;
-		}
-
 		//Create buffers for output waveforms
 		SparseDigitalWaveform* caps[8];
 		for(size_t j = 0; j < 8; j++)
 		{
-			auto nchan = m_digitalChannelBase + 8 * podnum + j;
+			auto nchan = 8 * i + j;
 			caps[j] = AllocateDigitalWaveform(m_nickname + "." + GetOscilloscopeChannel(nchan)->GetHwname());
 			s[GetOscilloscopeChannel(nchan)] = caps[j];
 		}
@@ -412,56 +373,6 @@ bool PicoLogicAnalyser::AcquireData()
 		}
 
 		delete[] buf;
-	}
-
-	//If we have GPU support for int16, we can do the conversion on the card
-	//But only do this if we also have push-descriptor support, because doing N separate dispatches is likely
-	//to be slower than a parallel CPU-side conversion
-	//Note also that a strict benchmarking here may be slower than the CPU version due to transfer latency,
-	//but having the waveform on the GPU now means we don't have to do *that* later.
-	if(g_hasShaderInt16 && g_hasPushDescriptor)
-	{
-		m_cmdBuf->begin({});
-
-		m_conversionPipeline->Bind(*m_cmdBuf);
-
-		for(size_t i = 0; i < awfms.size(); i++)
-		{
-			auto cap = awfms[i];
-
-			m_conversionPipeline->BindBufferNonblocking(0, cap->m_samples, *m_cmdBuf, true);
-			m_conversionPipeline->BindBufferNonblocking(1, *m_analogRawWaveformBuffers[achans[i]], *m_cmdBuf);
-
-			ConvertRawSamplesShaderArgs args;
-			args.size = cap->size();
-			args.gain = scales[i];
-			args.offset = -offsets[i];
-
-			m_conversionPipeline->DispatchNoRebind(*m_cmdBuf, args, GetComputeBlockCount(cap->size(), 64));
-
-			cap->MarkModifiedFromGpu();
-		}
-
-		m_cmdBuf->end();
-		m_queue->SubmitAndBlock(*m_cmdBuf);
-	}
-	else
-	{
-//Fallback path
-//Process analog captures in parallel
-#pragma omp parallel for
-		for(size_t i = 0; i < awfms.size(); i++)
-		{
-			auto cap = awfms[i];
-			cap->PrepareForCpuAccess();
-			Convert16BitSamples(cap->m_samples.GetCpuPointer(),
-				m_analogRawWaveformBuffers[achans[i]]->GetCpuPointer(),
-				scales[i],
-				-offsets[i],
-				cap->size());
-
-			cap->MarkSamplesModifiedFromCpu();
-		}
 	}
 
 	//Save the waveforms to our queue
@@ -641,7 +552,7 @@ vector<Oscilloscope::DigitalBank> PicoLogicAnalyser::GetDigitalBanks()
 	for(size_t i = 0; i < m_digitalChannelCount; i++)
 	{
 		DigitalBank bank;
-		bank.push_back(GetOscilloscopeChannel(m_digitalChannelBase + i));
+		bank.push_back(GetOscilloscopeChannel(i));
 		banks.push_back(bank);
 	}
 	return banks;
@@ -652,83 +563,4 @@ Oscilloscope::DigitalBank PicoLogicAnalyser::GetDigitalBank(size_t channel)
 	DigitalBank ret;
 	ret.push_back(GetOscilloscopeChannel(channel));
 	return ret;
-}
-
-/**
-	@brief Returns the total number of 8-bit MSO pods which are currently enabled
- */
-size_t PicoLogicAnalyser::GetEnabledDigitalPodCount()
-{
-	size_t n = 0;
-	if(IsDigitalPodActive(0))
-		n++;
-	if(IsDigitalPodActive(1))
-		n++;
-	return n;
-}
-
-/**
-	@brief Returns the total number of analog channels in the requested range which are currently enabled
- */
-size_t PicoLogicAnalyser::GetEnabledAnalogChannelCountRange(size_t start, size_t end)
-{
-	if(end >= m_analogChannelCount)
-		end = m_analogChannelCount - 1;
-
-	size_t n = 0;
-	for(size_t i = start; i <= end; i++)
-	{
-		if(IsChannelEnabled(i))
-			n++;
-	}
-	return n;
-}
-
-/**
-	@brief Check if a MSO pod is present
- */
-bool PicoLogicAnalyser::IsDigitalPodPresent(size_t npod)
-{
-	return true;
-}
-
-/**
-	@brief Check if any channels in an MSO pod are enabled
- */
-bool PicoLogicAnalyser::IsDigitalPodActive(size_t npod)
-{
-	return true;
-}
-
-/**
-	@brief Checks if a channel index refers to a MSO channel
- */
-bool PicoLogicAnalyser::IsChannelIndexDigital(size_t i)
-{
-	return (i >= m_digitalChannelBase) && (i < m_digitalChannelBase + m_digitalChannelCount);
-}
-
-bool PicoLogicAnalyser::CanEnableChannel(size_t i)
-{
-	//If channel is already on, of course it can stay on
-	if(IsChannelEnabled(i))
-		return true;
-
-	//Digital channels
-	if(IsChannelIndexDigital(i))
-	{
-		size_t npod = GetDigitalPodIndex(i);
-
-		//If the pod isn't here, we can't enable it
-		if(!IsDigitalPodPresent(npod))
-			return false;
-
-		//If other channels in the pod are already active, we can enable them
-		if(IsDigitalPodActive(npod))
-			return true;
-	}
-
-	//When in doubt, assume all channels are available
-	LogWarning("PicoLogicAnalyser::CanEnableChannel: Unknown ADC mode\n");
-	return true;
 }

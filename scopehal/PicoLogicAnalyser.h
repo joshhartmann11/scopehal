@@ -64,7 +64,6 @@ public:
 	virtual unsigned int GetChannelBandwidthLimit(size_t i) override;
 	virtual void SetChannelBandwidthLimit(size_t i, unsigned int limit_mhz) override;
 	virtual OscilloscopeChannel* GetExternalTrigger() override;
-	virtual bool CanEnableChannel(size_t i) override;
 
 	//Triggering
 	virtual Oscilloscope::TriggerMode PollTrigger() override;
@@ -99,11 +98,8 @@ public:
 		SERIES_UNKNOWN	  //unknown or invalid model name
 	};
 
-	bool IsDigitalPodPresent(size_t npod);
 	bool IsDigitalPodActive(size_t npod);
 	bool IsChannelIndexDigital(size_t i);
-	size_t GetDigitalPodIndex(size_t i) { return (i - m_digitalChannelBase) / 8; }
-	size_t GetDigitalLaneIndex(size_t i) { return (i - m_digitalChannelBase) % 8; }
 
 protected:
 	void IdentifyHardware();
@@ -122,8 +118,6 @@ protected:
 	std::string GetChannelColor(size_t i);
 
 	//hardware analog channel count, independent of LA option etc
-	size_t m_analogChannelCount;
-	size_t m_digitalChannelBase;
 	size_t m_digitalChannelCount;
 
 	OscilloscopeChannel* m_extTrigChannel;
