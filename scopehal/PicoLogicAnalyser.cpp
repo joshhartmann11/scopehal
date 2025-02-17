@@ -162,7 +162,7 @@ unsigned int PicoLogicAnalyser::GetInstrumentTypes() const
 	return Instrument::INST_OSCILLOSCOPE;
 }
 
-uint32_t PicoLogicAnalyser::GetInstrumentTypesForChannel(size_t i) const
+uint32_t PicoLogicAnalyser::GetInstrumentTypesForChannel(size_t) const
 {
 	return Instrument::INST_OSCILLOSCOPE;
 }
@@ -417,8 +417,7 @@ vector<uint64_t> PicoLogicAnalyser::GetSampleRatesNonInterleaved()
 			break;
 
 		auto block = rates.substr(istart, i - istart);
-		uint64_t fs = stoull(block);
-		auto hz = FS_PER_SECOND / fs;
+		uint64_t hz = stoull(block);
 		ret.push_back(hz);
 
 		//skip the comma
