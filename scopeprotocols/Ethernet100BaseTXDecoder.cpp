@@ -2,7 +2,7 @@
 *                                                                                                                      *
 * libscopeprotocols                                                                                                    *
 *                                                                                                                      *
-* Copyright (c) 2012-2022 Andrew D. Zonenberg and contributors                                                         *
+* Copyright (c) 2012-2025 Andrew D. Zonenberg and contributors                                                         *
 * All rights reserved.                                                                                                 *
 *                                                                                                                      *
 * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
@@ -71,7 +71,9 @@ bool Ethernet100BaseTXDecoder::ValidateChannel(size_t i, StreamDescriptor stream
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Actual decoder logic
 
-void Ethernet100BaseTXDecoder::Refresh()
+void Ethernet100BaseTXDecoder::Refresh(
+	[[maybe_unused]] vk::raii::CommandBuffer& cmdBuf,
+	[[maybe_unused]] shared_ptr<QueueHandle> queue)
 {
 	ClearPackets();
 
@@ -89,6 +91,7 @@ void Ethernet100BaseTXDecoder::Refresh()
 
 	//Sample the input on the edges of the recovered clock
 	SparseAnalogWaveform samples;
+	samples.SetCpuOnlyHint();
 	samples.PrepareForCpuAccess();
 	SampleOnAnyEdgesBase(din, clk, samples);
 	size_t ilen = samples.size();
@@ -96,32 +99,29 @@ void Ethernet100BaseTXDecoder::Refresh()
 	//MLT-3 decode
 	//TODO: some kind of sanity checking that voltage is changing in the right direction
 	int oldstate = GetState(samples.m_samples[0]);
-	SparseDigitalWaveform bits;
-	bits.PrepareForCpuAccess();
+	vector<uint8_t> bits;
+	bits.resize(ilen-1);
 	for(size_t i=1; i<ilen; i++)
 	{
 		int nstate = GetState(samples.m_samples[i]);
 
-		bits.m_offsets.push_back(samples.m_offsets[i]);
-		bits.m_durations.push_back(samples.m_durations[i]);
-
 		//No transition? Add a "0" bit
 		if(nstate == oldstate)
-			bits.m_samples.push_back(false);
+			bits[i-1] = false;
 
 		//Transition? Add a "1" bit
 		else
-			bits.m_samples.push_back(true);
+			bits[i-1] = true;
 
 		oldstate = nstate;
 	}
 
 	//RX LFSR sync
-	size_t nbits = bits.m_samples.size();
-	SparseDigitalWaveform descrambled_bits;
-	descrambled_bits.PrepareForCpuAccess();
+	size_t nbits = bits.size();
+	vector<uint8_t> descrambled_bits;
 	bool synced = false;
-	for(size_t idle_offset = 0; idle_offset<15000; idle_offset++)
+	size_t idle_offset = 0;
+	for(; idle_offset<15000; idle_offset++)
 	{
 		if(TrySync(bits, descrambled_bits, idle_offset, nbits))
 		{
@@ -139,10 +139,11 @@ void Ethernet100BaseTXDecoder::Refresh()
 	}
 
 	//Copy our timestamps from the input. Output has femtosecond resolution since we sampled on clock edges
-	auto cap = new EthernetWaveform;
+	//For now, hint the capture to not use GPU memory since none of our Ethernet decodes run on the GPU
+	auto cap = SetupEmptyWaveform<EthernetWaveform>(din,0, true);
+	cap->SetCpuOnlyHint();
+	cap->Reserve(1000000);
 	cap->m_timescale = 1;
-	cap->m_startTimestamp = din->m_startTimestamp;
-	cap->m_startFemtoseconds = din->m_startFemtoseconds;
 	cap->PrepareForCpuAccess();
 	SetData(cap, 0);
 
@@ -150,13 +151,13 @@ void Ethernet100BaseTXDecoder::Refresh()
 	bool ssd[10] = {1, 1, 0, 0, 0, 1, 0, 0, 0, 1};
 	size_t i = 0;
 	bool hit = true;
-	size_t des10 = descrambled_bits.m_samples.size() - 10;
+	size_t des10 = descrambled_bits.size() - 10;
 	for(i=0; i<des10; i++)
 	{
 		hit = true;
 		for(int j=0; j<10; j++)
 		{
-			bool b = descrambled_bits.m_samples[i+j];
+			bool b = descrambled_bits[i+j];
 			if(b != ssd[j])
 			{
 				hit = false;
@@ -223,15 +224,15 @@ void Ethernet100BaseTXDecoder::Refresh()
 	bool first = true;
 	uint8_t current_byte = 0;
 	uint64_t current_start = 0;
-	size_t deslen = descrambled_bits.m_samples.size()-5;
+	size_t deslen = descrambled_bits.size()-5;
 	for(; i<deslen; i+=5)
 	{
 		unsigned int code =
-			(descrambled_bits.m_samples[i+0] ? 16 : 0) |
-			(descrambled_bits.m_samples[i+1] ? 8 : 0) |
-			(descrambled_bits.m_samples[i+2] ? 4 : 0) |
-			(descrambled_bits.m_samples[i+3] ? 2 : 0) |
-			(descrambled_bits.m_samples[i+4] ? 1 : 0);
+			(descrambled_bits[i+0] ? 16 : 0) |
+			(descrambled_bits[i+1] ? 8 : 0) |
+			(descrambled_bits[i+2] ? 4 : 0) |
+			(descrambled_bits[i+3] ? 2 : 0) |
+			(descrambled_bits[i+4] ? 1 : 0);
 
 		//Handle special stuff
 		if(code == 0x18)
@@ -249,7 +250,7 @@ void Ethernet100BaseTXDecoder::Refresh()
 			EthernetFrameSegment segment;
 			segment.m_type = EthernetFrameSegment::TYPE_TX_ERROR;
 			cap->m_offsets.push_back(current_start * cap->m_timescale);
-			uint64_t end = descrambled_bits.m_offsets[i+4] + descrambled_bits.m_durations[i+4];
+			uint64_t end = samples.m_offsets[idle_offset + i + 4] + samples.m_durations[idle_offset + i + 4];
 			cap->m_durations.push_back((end - current_start) * cap->m_timescale);
 			cap->m_samples.push_back(segment);
 
@@ -285,7 +286,7 @@ void Ethernet100BaseTXDecoder::Refresh()
 		unsigned int decoded = code_5to4[code];
 		if(first)
 		{
-			current_start = descrambled_bits.m_offsets[i];
+			current_start = samples.m_offsets[idle_offset + i];
 			current_byte = decoded;
 		}
 		else
@@ -294,7 +295,7 @@ void Ethernet100BaseTXDecoder::Refresh()
 
 			bytes.push_back(current_byte);
 			starts.push_back(current_start * cap->m_timescale);
-			uint64_t end = descrambled_bits.m_offsets[i+4] + descrambled_bits.m_durations[i+4];
+			uint64_t end = samples.m_offsets[idle_offset + i + 4] + samples.m_durations[idle_offset + i + 4];
 			ends.push_back(end * cap->m_timescale);
 		}
 
@@ -305,68 +306,54 @@ void Ethernet100BaseTXDecoder::Refresh()
 }
 
 bool Ethernet100BaseTXDecoder::TrySync(
-	SparseDigitalWaveform& bits,
-	SparseDigitalWaveform& descrambled_bits,
+	vector<uint8_t>& bits,
+	vector<uint8_t>& descrambled_bits,
 	size_t idle_offset,
 	size_t stop)
 {
-	if( (idle_offset + 64) >= bits.m_samples.size())
+	if( (idle_offset + 64) >= bits.size())
 		return false;
-	descrambled_bits.clear();
 
 	//For now, assume the link is idle at the time we triggered
 	unsigned int lfsr =
-		( (!bits.m_samples[idle_offset + 0]) << 10 ) |
-		( (!bits.m_samples[idle_offset + 1]) << 9 ) |
-		( (!bits.m_samples[idle_offset + 2]) << 8 ) |
-		( (!bits.m_samples[idle_offset + 3]) << 7 ) |
-		( (!bits.m_samples[idle_offset + 4]) << 6 ) |
-		( (!bits.m_samples[idle_offset + 5]) << 5 ) |
-		( (!bits.m_samples[idle_offset + 6]) << 4 ) |
-		( (!bits.m_samples[idle_offset + 7]) << 3 ) |
-		( (!bits.m_samples[idle_offset + 8]) << 2 ) |
-		( (!bits.m_samples[idle_offset + 9]) << 1 ) |
-		( (!bits.m_samples[idle_offset + 10]) << 0 );
+		( (!bits[idle_offset + 0]) << 10 ) |
+		( (!bits[idle_offset + 1]) << 9 ) |
+		( (!bits[idle_offset + 2]) << 8 ) |
+		( (!bits[idle_offset + 3]) << 7 ) |
+		( (!bits[idle_offset + 4]) << 6 ) |
+		( (!bits[idle_offset + 5]) << 5 ) |
+		( (!bits[idle_offset + 6]) << 4 ) |
+		( (!bits[idle_offset + 7]) << 3 ) |
+		( (!bits[idle_offset + 8]) << 2 ) |
+		( (!bits[idle_offset + 9]) << 1 ) |
+		( (!bits[idle_offset + 10]) << 0 );
 
 	//Descramble
-	stop = min(stop, bits.m_samples.size());
+	stop = min(stop, bits.size());
 	size_t start = idle_offset + 11;
 	size_t len = stop - start;
-	descrambled_bits.m_offsets.reserve(len);
-	descrambled_bits.m_durations.reserve(len);
-	descrambled_bits.m_samples.reserve(len);
+	descrambled_bits.resize(len);
 	size_t window = 64 + idle_offset + 11;
+	size_t iout = 0;
 	for(size_t i=start; i < stop; i++)
 	{
 		lfsr = (lfsr << 1) ^ ((lfsr >> 8)&1) ^ ((lfsr >> 10)&1);
+		bool b = bits[i] ^ (lfsr & 1);
+		descrambled_bits[iout] = b;
+		iout ++;
 
-		descrambled_bits.m_offsets.push_back(bits.m_offsets[i]);
-		descrambled_bits.m_durations.push_back(bits.m_durations[i]);
-		bool b = bits.m_samples[i] ^ (lfsr & 1);
-		descrambled_bits.m_samples.push_back(b);
-
-		if(descrambled_bits.m_samples.size() == window)
+		if(iout == window)
 		{
 			//We should have at least 64 "1" bits in a row once the descrambling is done.
 			//The minimum inter-frame gap is a lot bigger than this.
 			for(int j=0; j<64; j++)
 			{
-				if(descrambled_bits.m_samples[j + idle_offset + 11] != 1)
+				if(descrambled_bits[j + idle_offset + 11] != 1)
 					return false;
 			}
 		}
 	}
 
-	//Synced, all good
+	//All good if we get to here
 	return true;
-}
-
-int Ethernet100BaseTXDecoder::GetState(float voltage)
-{
-	if(voltage > 0.5)
-		return 1;
-	else if(voltage < -0.5)
-		return -1;
-	else
-		return 0;
 }

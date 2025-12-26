@@ -2,7 +2,7 @@
 *                                                                                                                      *
 * libscopehal                                                                                                          *
 *                                                                                                                      *
-* Copyright (c) 2012-2024 Andrew D. Zonenberg and contributors                                                         *
+* Copyright (c) 2012-2025 Andrew D. Zonenberg and contributors                                                         *
 * All rights reserved.                                                                                                 *
 *                                                                                                                      *
 * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
@@ -45,6 +45,11 @@
 
 using namespace std;
 
+enum ThunderscopeDataType_e {
+	DATATYPE_I8 = 2,
+	DATATYPE_I16 = 4
+};
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //Construction / destruction
 
@@ -62,6 +67,7 @@ ThunderScopeOscilloscope::ThunderScopeOscilloscope(SCPITransport* transport)
 	, m_diag_totalWFMs(FilterParameter::TYPE_INT, Unit(Unit::UNIT_COUNTS))
 	, m_diag_droppedWFMs(FilterParameter::TYPE_INT, Unit(Unit::UNIT_COUNTS))
 	, m_diag_droppedPercent(FilterParameter::TYPE_FLOAT, Unit(Unit::UNIT_PERCENT))
+	, m_adcMode(MODE_8BIT)
 {
 	m_analogChannelCount = 4;
 
@@ -91,14 +97,24 @@ ThunderScopeOscilloscope::ThunderScopeOscilloscope(SCPITransport* transport)
 		SetChannelVoltageRange(i, 0, 5);
 	}
 
-	//Set initial memory configuration.
-	SetSampleRate(1000000000L);
-	SetSampleDepth(10000);
-
 	//Set up the data plane socket
 	auto csock = dynamic_cast<SCPITwinLanTransport*>(m_transport);
 	if(!csock)
 		LogFatal("ThunderScopeOscilloscope expects a SCPITwinLanTransport\n");
+
+	//set initial bandwidth on all channels to full
+	m_bandwidthLimits.resize(4);
+	for(size_t i=0; i<4; i++)
+		SetChannelBandwidthLimit(i, 0);
+
+	//Set all channels off by default
+	for(size_t i=0; i<4; i++)
+		DisableChannel(i);
+
+	//Set initial memory configuration: 1M point depth @ 1 Gsps
+	//This must happen before the trigger is configured, since trigger validation depends on knowing memory depth
+	SetSampleRate(1000000000L);
+	SetSampleDepth(1000000);
 
 	//Configure the trigger
 	auto trig = new EdgeTrigger(this);
@@ -106,8 +122,8 @@ ThunderScopeOscilloscope::ThunderScopeOscilloscope(SCPITransport* transport)
 	trig->SetLevel(0);
 	trig->SetInput(0, StreamDescriptor(GetOscilloscopeChannel(0)));
 	SetTrigger(trig);
-	PushTrigger();
 	SetTriggerOffset(1000000000); //1us to allow trigphase interpolation
+	//don't need a second PushTrigger() call, SetTriggerOffset will implicitly do one
 
 	m_diagnosticValues["Hardware WFM/s"] = &m_diag_hardwareWFMHz;
 	m_diagnosticValues["Received WFM/s"] = &m_diag_receivedWFMHz;
@@ -154,15 +170,15 @@ ThunderScopeOscilloscope::ThunderScopeOscilloscope(SCPITransport* transport)
 				bufname.c_str()));
 	}
 
-	m_conversionPipeline = make_unique<ComputePipeline>(
+	m_conversion8BitPipeline = make_unique<ComputePipeline>(
 		"shaders/Convert8BitSamples.spv", 2, sizeof(ConvertRawSamplesShaderArgs) );
+
+	m_conversion16BitPipeline = make_unique<ComputePipeline>(
+		"shaders/Convert16BitSamples.spv", 2, sizeof(ConvertRawSamplesShaderArgs) );
 
 	m_clippingBuffer.resize(1);
 
-	//set initial bandwidth on all channels to full
-	m_bandwidthLimits.resize(4);
-	for(size_t i=0; i<4; i++)
-		SetChannelBandwidthLimit(i, 0);
+	//TODO: query ADC mode on hardware
 }
 
 /**
@@ -229,7 +245,20 @@ string ThunderScopeOscilloscope::GetDriverNameInternal()
 
 void ThunderScopeOscilloscope::FlushConfigCache()
 {
-	lock_guard<recursive_mutex> lock(m_cacheMutex);
+	//Refresh sample rate from hardware
+	RefreshSampleRate();
+}
+
+void ThunderScopeOscilloscope::RefreshSampleRate()
+{
+	auto reply = m_transport->SendCommandQueuedWithReply("ACQ:RATE?");
+	m_srate = stoi(reply);
+}
+
+void ThunderScopeOscilloscope::EnableChannel(size_t i)
+{
+	RemoteBridgeOscilloscope::EnableChannel(i);
+	RefreshSampleRate();
 }
 
 double ThunderScopeOscilloscope::GetChannelAttenuation(size_t i)
@@ -297,8 +326,13 @@ Oscilloscope::TriggerMode ThunderScopeOscilloscope::PollTrigger()
 
 bool ThunderScopeOscilloscope::AcquireData()
 {
-	const uint8_t r = 'K';
+	const uint8_t r = 'S';
 	m_transport->SendRawData(1, &r);
+
+	//Read Version No.
+	uint8_t version;
+	if(!m_transport->ReadRawData(sizeof(version), (uint8_t*)&version))
+		return false;
 
 	//Read the sequence number of the current waveform
 	uint32_t seqnum;
@@ -339,6 +373,7 @@ bool ThunderScopeOscilloscope::AcquireData()
 
 	//Acquire data for each channel
 	uint8_t chnum;
+	uint8_t dataType;
 	uint64_t memdepth;
 	float config[3];
 	SequenceSet s;
@@ -383,9 +418,14 @@ bool ThunderScopeOscilloscope::AcquireData()
 			if(!m_transport->ReadRawData(sizeof(clipping), (uint8_t*)&clipping))
 				return false;
 
-			//TODO: stream timestamp from the server
+			if(!m_transport->ReadRawData(sizeof(dataType), (uint8_t*)&dataType))
+				return false;
 
-			if(!m_transport->ReadRawData(memdepth * sizeof(int8_t), (uint8_t*)buf))
+			//TODO: stream timestamp from the server
+			uint32_t depth = memdepth * sizeof(int8_t);
+			if(dataType == DATATYPE_I16)
+				depth = memdepth * sizeof(int16_t);
+			if(!m_transport->ReadRawData(depth, (uint8_t*)buf))
 				return false;
 			abuf->MarkModifiedFromCpu();
 
@@ -393,7 +433,7 @@ bool ThunderScopeOscilloscope::AcquireData()
 			UniformAnalogWaveform* cap = AllocateAnalogWaveform(m_nickname + "." + GetChannel(i)->GetHwname());
 			cap->m_timescale = fs_per_sample;
 			cap->m_triggerPhase = trigphase;
-			cap->m_startTimestamp = time(NULL);
+			cap->m_startTimestamp = t;
 			cap->m_startFemtoseconds = fs;
 			if (clipping)
 				cap->m_flags |= WaveformBase::WAVEFORM_CLIPPING;
@@ -412,25 +452,59 @@ bool ThunderScopeOscilloscope::AcquireData()
 	}
 
 	//Prefer GPU path
-	if(g_hasShaderInt8 && g_hasPushDescriptor)
+	if(g_hasShaderInt8 && g_hasPushDescriptor && (dataType == DATATYPE_I8))
 	{
 		m_cmdBuf->begin({});
 
-		m_conversionPipeline->Bind(*m_cmdBuf);
+		m_conversion8BitPipeline->Bind(*m_cmdBuf);
 
 		for(size_t i=0; i<awfms.size(); i++)
 		{
 			auto cap = awfms[i];
 
-			m_conversionPipeline->BindBufferNonblocking(0, cap->m_samples, *m_cmdBuf, true);
-			m_conversionPipeline->BindBufferNonblocking(1, *m_analogRawWaveformBuffers[achans[i]], *m_cmdBuf);
+			m_conversion8BitPipeline->BindBufferNonblocking(0, cap->m_samples, *m_cmdBuf, true);
+			m_conversion8BitPipeline->BindBufferNonblocking(1, *m_analogRawWaveformBuffers[achans[i]], *m_cmdBuf);
 
 			ConvertRawSamplesShaderArgs args;
 			args.size = cap->size();
 			args.gain = scales[i];
 			args.offset = -offsets[i];
 
-			m_conversionPipeline->DispatchNoRebind(*m_cmdBuf, args, GetComputeBlockCount(cap->size(), 64));
+			const uint32_t compute_block_count = GetComputeBlockCount(cap->size(), 64);
+			m_conversion8BitPipeline->DispatchNoRebind(
+				*m_cmdBuf, args,
+				min(compute_block_count, 32768u),
+				compute_block_count / 32768 + 1);
+
+			cap->MarkModifiedFromGpu();
+		}
+
+		m_cmdBuf->end();
+		m_queue->SubmitAndBlock(*m_cmdBuf);
+	}
+	else if(g_hasShaderInt16 && g_hasPushDescriptor && (dataType == DATATYPE_I16))
+	{
+		m_cmdBuf->begin({});
+
+		m_conversion16BitPipeline->Bind(*m_cmdBuf);
+
+		for(size_t i=0; i<awfms.size(); i++)
+		{
+			auto cap = awfms[i];
+
+			m_conversion16BitPipeline->BindBufferNonblocking(0, cap->m_samples, *m_cmdBuf, true);
+			m_conversion16BitPipeline->BindBufferNonblocking(1, *m_analogRawWaveformBuffers[achans[i]], *m_cmdBuf);
+
+			ConvertRawSamplesShaderArgs args;
+			args.size = cap->size();
+			args.gain = scales[i];
+			args.offset = -offsets[i];
+
+			const uint32_t compute_block_count = GetComputeBlockCount(cap->size(), 64);
+			m_conversion16BitPipeline->DispatchNoRebind(
+				*m_cmdBuf, args,
+				min(compute_block_count, 32768u),
+				compute_block_count / 32768 + 1);
 
 			cap->MarkModifiedFromGpu();
 		}
@@ -448,12 +522,24 @@ bool ThunderScopeOscilloscope::AcquireData()
 		{
 			auto cap = awfms[i];
 			cap->PrepareForCpuAccess();
-			Convert8BitSamples(
-				(float*)&cap->m_samples[0],
-				(int8_t*)m_analogRawWaveformBuffers[achans[i]]->GetCpuPointer(),
-				scales[i],
-				offsets[i],
-				cap->m_samples.size());
+			if(dataType == DATATYPE_I8)
+			{
+				Convert8BitSamples(
+					(float*)&cap->m_samples[0],
+					(int8_t*)m_analogRawWaveformBuffers[achans[i]]->GetCpuPointer(),
+					scales[i],
+					offsets[i],
+					cap->m_samples.size());
+			}
+			else if(dataType == DATATYPE_I16)
+			{
+				Convert16BitSamples(
+					(float*)&cap->m_samples[0],
+					(int16_t*)m_analogRawWaveformBuffers[achans[i]]->GetCpuPointer(),
+					scales[i],
+					offsets[i],
+					cap->m_samples.size());
+			}
 			cap->MarkModifiedFromCpu();
 		}
 	}
@@ -469,11 +555,12 @@ bool ThunderScopeOscilloscope::AcquireData()
 	m_pendingWaveformsMutex.lock();
 	m_pendingWaveforms.push_back(s);
 
+	//If we get backed up, drop the extra waveforms
 	while (m_pendingWaveforms.size() > 2)
 	{
 		SequenceSet set = *m_pendingWaveforms.begin();
 		for(auto it : set)
-			delete it.second;
+			AddWaveformToAnalogPool(it.second);
 		m_pendingWaveforms.pop_front();
 
 		dropped++;
@@ -500,7 +587,12 @@ void ThunderScopeOscilloscope::Start()
 {
 	m_triggerArmed = true; //FIXME
 
-	RemoteBridgeOscilloscope::Start();
+	m_transport->SendCommandQueued("NORMAL");
+	m_transport->SendCommandQueued("RUN");
+
+	m_triggerArmed = true;
+	m_triggerOneShot = false;
+
 	ResetPerCaptureDiagnostics();
 }
 
@@ -512,20 +604,67 @@ void ThunderScopeOscilloscope::StartSingleTrigger()
 
 void ThunderScopeOscilloscope::ForceTrigger()
 {
-	RemoteBridgeOscilloscope::ForceTrigger();
+	m_transport->SendCommandQueued("SINGLE");
+	m_transport->SendCommandQueued("FORCE");
+
+	m_triggerArmed = true;
+	m_triggerOneShot = true;
+
 	ResetPerCaptureDiagnostics();
+}
+
+void ThunderScopeOscilloscope::PushEdgeTrigger(EdgeTrigger* trig)
+{
+	//Type
+	m_transport->SendCommandQueued("TRIG:TYPE EDGE");
+
+	//Delay
+	m_transport->SendCommandQueued("TRIG:DELAY " + to_string(m_triggerOffset));
+
+	//Source
+	auto chan = dynamic_cast<OscilloscopeChannel*>(trig->GetInput(0).m_channel);
+	m_transport->SendCommandQueued("TRIG:SOU " + chan->GetHwname());
+
+	//Level
+	char buf[128];
+	snprintf(buf, sizeof(buf), "TRIG:EDGE:LEV %f", trig->GetLevel() / chan->GetAttenuation());
+	m_transport->SendCommandQueued(buf);
+
+	//Slope
+	switch(trig->GetType())
+	{
+		case EdgeTrigger::EDGE_RISING:
+			m_transport->SendCommandQueued("TRIG:EDGE:DIR RISING");
+			break;
+		case EdgeTrigger::EDGE_FALLING:
+			m_transport->SendCommandQueued("TRIG:EDGE:DIR FALLING");
+			break;
+		case EdgeTrigger::EDGE_ANY:
+			m_transport->SendCommandQueued("TRIG:EDGE:DIR ANY");
+			break;
+		default:
+			LogWarning("Unknown edge type\n");
+			return;
+	}
+}
+
+void ThunderScopeOscilloscope::SetSampleDepth(uint64_t depth)
+{
+	m_transport->SendCommandQueued(string("ACQ:DEPTH ") + to_string(depth));
+	m_mdepth = depth;
+}
+
+void ThunderScopeOscilloscope::SetSampleRate(uint64_t rate)
+{
+	m_srate = rate;
+	m_transport->SendCommandQueued(string("ACQ:RATE ") + to_string(rate));
 }
 
 vector<uint64_t> ThunderScopeOscilloscope::GetSampleRatesNonInterleaved()
 {
 	vector<uint64_t> ret;
 
-	string rates;
-	{
-		lock_guard<recursive_mutex> lock(m_mutex);
-		m_transport->SendCommand("RATES?");
-		rates = m_transport->ReadReply();
-	}
+	string rates = m_transport->SendCommandQueuedWithReply("ACQ:RATES?");
 
 	size_t i=0;
 	while(true)
@@ -553,6 +692,17 @@ vector<uint64_t> ThunderScopeOscilloscope::GetSampleRatesInterleaved()
 	return ret;
 }
 
+//interleaving not supported
+bool ThunderScopeOscilloscope::CanInterleave()
+{
+	return false;
+}
+
+bool ThunderScopeOscilloscope::HasInterleavingControls()
+{
+	return false;
+}
+
 set<Oscilloscope::InterleaveConflict> ThunderScopeOscilloscope::GetInterleaveConflicts()
 {
 	//interleaving not supported
@@ -564,12 +714,7 @@ vector<uint64_t> ThunderScopeOscilloscope::GetSampleDepthsNonInterleaved()
 {
 	vector<uint64_t> ret;
 
-	string depths;
-	{
-		lock_guard<recursive_mutex> lock(m_mutex);
-		m_transport->SendCommand("DEPTHS?");
-		depths = m_transport->ReadReply();
-	}
+	string depths = m_transport->SendCommandQueuedWithReply("ACQ:DEPTHS?");
 
 	size_t i=0;
 	while(true)
@@ -630,23 +775,23 @@ void ThunderScopeOscilloscope::SetChannelCoupling(size_t i, OscilloscopeChannel:
 	switch(type)
 	{
 		case OscilloscopeChannel::COUPLE_AC_1M:
-			m_transport->SendCommand(":" + m_channels[i]->GetHwname() + ":COUP AC");
-			m_transport->SendCommand(":" + m_channels[i]->GetHwname() + ":TERM 1M");
+			m_transport->SendCommandQueued(":" + m_channels[i]->GetHwname() + ":COUP AC");
+			m_transport->SendCommandQueued(":" + m_channels[i]->GetHwname() + ":TERM 1M");
 			break;
 
 		case OscilloscopeChannel::COUPLE_DC_1M:
-			m_transport->SendCommand(":" + m_channels[i]->GetHwname() + ":COUP DC");
-			m_transport->SendCommand(":" + m_channels[i]->GetHwname() + ":TERM 1M");
+			m_transport->SendCommandQueued(":" + m_channels[i]->GetHwname() + ":COUP DC");
+			m_transport->SendCommandQueued(":" + m_channels[i]->GetHwname() + ":TERM 1M");
 			break;
 
 		case OscilloscopeChannel::COUPLE_AC_50:
-			m_transport->SendCommand(":" + m_channels[i]->GetHwname() + ":COUP AC");
-			m_transport->SendCommand(":" + m_channels[i]->GetHwname() + ":TERM 50");
+			m_transport->SendCommandQueued(":" + m_channels[i]->GetHwname() + ":COUP AC");
+			m_transport->SendCommandQueued(":" + m_channels[i]->GetHwname() + ":TERM 50");
 			break;
 
 		case OscilloscopeChannel::COUPLE_DC_50:
-			m_transport->SendCommand(":" + m_channels[i]->GetHwname() + ":COUP DC");
-			m_transport->SendCommand(":" + m_channels[i]->GetHwname() + ":TERM 50");
+			m_transport->SendCommandQueued(":" + m_channels[i]->GetHwname() + ":COUP DC");
+			m_transport->SendCommandQueued(":" + m_channels[i]->GetHwname() + ":TERM 50");
 			break;
 
 		default:
@@ -657,6 +802,48 @@ void ThunderScopeOscilloscope::SetChannelCoupling(size_t i, OscilloscopeChannel:
 	{
 		lock_guard<recursive_mutex> lock2(m_cacheMutex);
 		m_channelCouplings[i] = type;
+	}
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// ADC modes
+
+bool ThunderScopeOscilloscope::IsADCModeConfigurable()
+{
+	return true;
+}
+
+vector<string> ThunderScopeOscilloscope::GetADCModeNames([[maybe_unused]] size_t channel)
+{
+	vector<string> ret;
+	ret.push_back("8 bit");
+	ret.push_back("12 bit");
+	return ret;
+}
+
+size_t ThunderScopeOscilloscope::GetADCMode([[maybe_unused]] size_t channel)
+{
+	return m_adcMode;
+}
+
+void ThunderScopeOscilloscope::SetADCMode([[maybe_unused]] size_t channel, size_t mode)
+{
+	switch(mode)
+	{
+		case 0:
+			m_adcMode = MODE_8BIT;
+			m_transport->SendCommandQueued("ACQ:RES 8");
+			break;
+
+		//12 bit mode has lower Fmax so need to refresh sample rate in case the scope clamped us
+		case 1:
+			m_adcMode = MODE_12BIT;
+			m_transport->SendCommandQueued("ACQ:RES 12");
+			RefreshSampleRate();
+			break;
+
+		default:
+			break;
 	}
 }
 

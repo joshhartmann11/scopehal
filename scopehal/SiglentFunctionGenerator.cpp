@@ -2,7 +2,7 @@
 *                                                                                                                      *
 * libscopehal                                                                                                          *
 *                                                                                                                      *
-* Copyright (c) 2012-2024 Andrew D. Zonenberg and contributors                                                         *
+* Copyright (c) 2012-2025 Andrew D. Zonenberg and contributors                                                         *
 * All rights reserved.                                                                                                 *
 *                                                                                                                      *
 * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
@@ -153,7 +153,7 @@ void SiglentFunctionGenerator::ParseOutputState(const string& str, size_t i)
 void SiglentFunctionGenerator::ParseBasicWaveform(const string& str, size_t i)
 {
 	auto fields = explode(str, ',');
-	LogDebug("ParseBasicWaveform\n");
+	LogTrace("ParseBasicWaveform\n");
 	LogIndenter li;
 
 	//Fields are paired as name,value consecutively
@@ -341,6 +341,10 @@ float SiglentFunctionGenerator::GetFunctionChannelFrequency(int chan)
 
 void SiglentFunctionGenerator::SetFunctionChannelFrequency(int chan, float hz)
 {
+	if(m_cachedFrequencyValid[chan] && std::abs(m_cachedFrequency[chan] - hz) < 1e-6)
+	{
+		return;
+	}
 	m_transport->SendCommandQueued(m_channels[chan]->GetHwname() + ":BSWV FRQ," + to_string(hz));
 
 	m_cachedFrequency[chan] = hz;

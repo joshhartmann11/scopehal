@@ -2,7 +2,7 @@
 *                                                                                                                      *
 * libscopeprotocols                                                                                                    *
 *                                                                                                                      *
-* Copyright (c) 2012-2024 Andrew D. Zonenberg and contributors                                                         *
+* Copyright (c) 2012-2025 Andrew D. Zonenberg and contributors                                                         *
 * All rights reserved.                                                                                                 *
 *                                                                                                                      *
 * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
@@ -334,7 +334,10 @@ void CouplerDeEmbedFilter::SubtractInPlace(
 	m_subtractInPlaceComputePipeline.Bind(cmdBuf);
 	m_subtractInPlaceComputePipeline.BindBufferNonblocking(0, samplesInout, cmdBuf);
 	m_subtractInPlaceComputePipeline.BindBufferNonblocking(1, samplesSub, cmdBuf);
-	m_subtractInPlaceComputePipeline.DispatchNoRebind(cmdBuf, (uint32_t)npoints, GetComputeBlockCount(npoints, 64));
+	const uint32_t compute_block_count = GetComputeBlockCount(npoints, 64);
+	m_subtractInPlaceComputePipeline.DispatchNoRebind(cmdBuf, (uint32_t)npoints,
+		min(compute_block_count, 32768u),
+		compute_block_count / 32768 + 1);
 	m_subtractInPlaceComputePipeline.AddComputeMemoryBarrier(cmdBuf);
 	samplesInout.MarkModifiedFromGpu();
 }
@@ -353,7 +356,10 @@ void CouplerDeEmbedFilter::Subtract(
 	m_subtractComputePipeline.BindBufferNonblocking(0, samplesP, cmdBuf);
 	m_subtractComputePipeline.BindBufferNonblocking(1, samplesN, cmdBuf);
 	m_subtractComputePipeline.BindBufferNonblocking(2, samplesOut, cmdBuf, true);
-	m_subtractComputePipeline.DispatchNoRebind(cmdBuf, (uint32_t)npoints, GetComputeBlockCount(npoints, 64));
+	const uint32_t compute_block_count = GetComputeBlockCount(npoints, 64);
+	m_subtractComputePipeline.DispatchNoRebind(cmdBuf, (uint32_t)npoints,
+		min(compute_block_count, 32768u),
+		compute_block_count / 32768 + 1);
 	m_subtractComputePipeline.AddComputeMemoryBarrier(cmdBuf);
 	samplesOut.MarkModifiedFromGpu();
 }
@@ -418,7 +424,11 @@ void CouplerDeEmbedFilter::GenerateScalarOutput(
 	m_normalizeComputePipeline.Bind(cmdBuf);
 	m_normalizeComputePipeline.BindBufferNonblocking(0, m_scalarTempBuf1, cmdBuf);
 	m_normalizeComputePipeline.BindBufferNonblocking(1, cap->m_samples, cmdBuf, true);
-	m_normalizeComputePipeline.DispatchNoRebind(cmdBuf, nargs, GetComputeBlockCount(npoints, 64));
+
+	const uint32_t compute_block_count = GetComputeBlockCount(npoints, 64);
+	m_normalizeComputePipeline.DispatchNoRebind(cmdBuf, nargs,
+		min(compute_block_count, 32768u),
+		compute_block_count / 32768 + 1);
 	m_normalizeComputePipeline.AddComputeMemoryBarrier(cmdBuf);
 
 	cap->MarkModifiedFromGpu();
@@ -440,7 +450,11 @@ void CouplerDeEmbedFilter::ApplySParameters(
 	m_deEmbedComputePipeline.BindBufferNonblocking(1, samplesOut, cmdBuf, true);
 	m_deEmbedComputePipeline.BindBufferNonblocking(2, params.m_resampledSparamSines, cmdBuf);
 	m_deEmbedComputePipeline.BindBufferNonblocking(3, params.m_resampledSparamCosines, cmdBuf);
-	m_deEmbedComputePipeline.DispatchNoRebind(cmdBuf, (uint32_t)nouts, GetComputeBlockCount(npoints, 64));
+	const uint32_t compute_block_count = GetComputeBlockCount(npoints, 64);
+	m_deEmbedComputePipeline.DispatchNoRebind(
+		cmdBuf, (uint32_t)nouts,
+		min(compute_block_count, 32768u),
+		compute_block_count / 32768 + 1);
 	m_deEmbedComputePipeline.AddComputeMemoryBarrier(cmdBuf);
 	samplesOut.MarkModifiedFromGpu();
 }
@@ -459,7 +473,11 @@ void CouplerDeEmbedFilter::ApplySParametersInPlace(
 	m_deEmbedInPlaceComputePipeline.BindBufferNonblocking(0, samplesInout, cmdBuf);
 	m_deEmbedInPlaceComputePipeline.BindBufferNonblocking(1, params.m_resampledSparamSines, cmdBuf);
 	m_deEmbedInPlaceComputePipeline.BindBufferNonblocking(2, params.m_resampledSparamCosines, cmdBuf);
-	m_deEmbedInPlaceComputePipeline.DispatchNoRebind(cmdBuf, (uint32_t)nouts, GetComputeBlockCount(npoints, 64));
+
+	const uint32_t compute_block_count = GetComputeBlockCount(npoints, 64);
+	m_deEmbedInPlaceComputePipeline.DispatchNoRebind(cmdBuf, (uint32_t)nouts,
+		min(compute_block_count, 32768u),
+		compute_block_count / 32768 + 1);
 	m_deEmbedInPlaceComputePipeline.AddComputeMemoryBarrier(cmdBuf);
 	samplesInout.MarkModifiedFromGpu();
 }

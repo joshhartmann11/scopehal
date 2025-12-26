@@ -2,7 +2,7 @@
 *                                                                                                                      *
 * libscopehal                                                                                                          *
 *                                                                                                                      *
-* Copyright (c) 2012-2024 Andrew D. Zonenberg and contributors                                                         *
+* Copyright (c) 2012-2025 Andrew D. Zonenberg and contributors                                                         *
 * All rights reserved.                                                                                                 *
 *                                                                                                                      *
 * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
@@ -35,6 +35,7 @@
  */
 
 #include "scopehal.h"
+#include <shared_mutex>
 
 using namespace std;
 
@@ -108,7 +109,16 @@ void FilterGraphExecutor::RunBlocking(const set<FlowGraphNode*>& nodes)
 	//Update global performance stats
 	{
 		lock_guard<mutex> lock(m_perfStatsMutex);
-		m_lastExecutionTime = m_currentExecutionTime;
+
+		//For now, fixed half life exponential moving average
+		float halflife = 8;
+		float decay = 1 / pow(2, 1/halflife);
+
+		//TODO: staleness or removing of some sort for old entries?
+
+		//Add the new data
+		for(auto& it : m_currentExecutionTime)
+			m_lastExecutionTime[it.first] = (m_lastExecutionTime[it.first] * decay) + (it.second * (1-decay));
 	}
 }
 
@@ -201,6 +211,12 @@ void FilterGraphExecutor::ExecutorThread(FilterGraphExecutor* pThis, size_t i)
 	pthread_setname_np(pthread_self(), "FilterGraph");
 	#endif
 
+	//Make locale handling thread safe on Windows
+	#ifdef _WIN32
+	_configthreadlocale(_ENABLE_PER_THREAD_LOCALE);
+	Unit::SetDefaultLocale();
+	#endif
+
 	pThis->DoExecutorThread(i);
 }
 
@@ -258,6 +274,8 @@ void FilterGraphExecutor::DoExecutorThread(size_t i)
 		FlowGraphNode* f;
 		while( (f = GetNextRunnableNode()) != nullptr)
 		{
+			shared_lock<shared_mutex> lock(g_vulkanActivityMutex);
+
 			//Make sure the filter's inputs are where we need them
 			auto loc = f->GetInputLocation();
 			if(loc != Filter::LOC_DONTCARE)

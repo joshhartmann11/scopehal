@@ -1,3 +1,4 @@
+
 /***********************************************************************************************************************
 *                                                                                                                      *
 * libscopehal                                                                                                          *
@@ -313,6 +314,35 @@ TektronixOscilloscope::TektronixOscilloscope(SCPITransport* transport)
 
 	//Figure out what probes we have connected
 	DetectProbes();
+
+	//Create Vulkan objects for peak detection
+	m_queue = g_vkQueueManager->GetComputeQueue("TektronixOscilloscope.queue");
+	vk::CommandPoolCreateInfo poolInfo(
+		vk::CommandPoolCreateFlagBits::eTransient | vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
+		m_queue->m_family );
+	m_pool = make_unique<vk::raii::CommandPool>(*g_vkComputeDevice, poolInfo);
+
+	vk::CommandBufferAllocateInfo bufinfo(**m_pool, vk::CommandBufferLevel::ePrimary, 1);
+	m_cmdBuf = make_unique<vk::raii::CommandBuffer>(
+		std::move(vk::raii::CommandBuffers(*g_vkComputeDevice, bufinfo).front()));
+
+	if(g_hasDebugUtils)
+	{
+		string poolname = "TektronixOscilloscope.pool";
+		string bufname = "TektronixOscilloscope.cmdbuf";
+
+		g_vkComputeDevice->setDebugUtilsObjectNameEXT(
+			vk::DebugUtilsObjectNameInfoEXT(
+				vk::ObjectType::eCommandPool,
+				reinterpret_cast<uint64_t>(static_cast<VkCommandPool>(**m_pool)),
+				poolname.c_str()));
+
+		g_vkComputeDevice->setDebugUtilsObjectNameEXT(
+			vk::DebugUtilsObjectNameInfoEXT(
+				vk::ObjectType::eCommandBuffer,
+				reinterpret_cast<uint64_t>(static_cast<VkCommandBuffer>(**m_cmdBuf)),
+				bufname.c_str()));
+	}
 }
 
 TektronixOscilloscope::~TektronixOscilloscope()
@@ -1904,7 +1934,7 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 		//If channel is enabled but was just turned on/off, skip this channel
 		if(IsEnableStateDirty(i))
 		{
-			pending_waveforms[nchan].push_back(NULL);
+			pending_waveforms[nchan].push_back(nullptr);
 			continue;
 		}
 
@@ -1938,7 +1968,7 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 			//Read the data block
 			size_t msglen;
 			double* samples = (double*)m_transport->SendCommandImmediateWithRawBlockReply("CURV?", msglen);
-			if(samples == NULL)
+			if(samples == nullptr)
 			{
 				LogWarning("Didn't get any samples (timeout?)\n");
 
@@ -1965,7 +1995,7 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 			auto cap = new UniformAnalogWaveform;
 			cap->m_timescale = preamble.hzbase;
 			cap->m_triggerPhase = 0;
-			cap->m_startTimestamp = time(NULL);
+			cap->m_startTimestamp = time(nullptr);
 			double t = GetTime();
 			cap->m_startFemtoseconds = (t - floor(t)) * FS_PER_SECOND;
 			cap->Resize(nsamples);
@@ -1989,7 +2019,13 @@ bool TektronixOscilloscope::AcquireDataMSO56(map<int, vector<WaveformBase*> >& p
 
 			//Look for peaks
 			//TODO: make this configurable, for now 1 MHz spacing and up to 10 peaks
-			dynamic_cast<SpectrumChannel*>(m_channels[nchan])->FindPeaks(cap, 10, 1000000);
+			dynamic_cast<SpectrumChannel*>(m_channels[nchan])->FindPeaks(
+				cap,
+				10,
+				1000000,
+				true,
+				*m_cmdBuf,
+				m_queue);
 
 			succeeded = true;
 			break;

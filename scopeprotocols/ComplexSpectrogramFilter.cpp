@@ -2,7 +2,7 @@
 *                                                                                                                      *
 * libscopeprotocols                                                                                                    *
 *                                                                                                                      *
-* Copyright (c) 2012-2024 Andrew D. Zonenberg and contributors                                                         *
+* Copyright (c) 2012-2025 Andrew D. Zonenberg and contributors                                                         *
 * All rights reserved.                                                                                                 *
 *                                                                                                                      *
 * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
@@ -39,7 +39,6 @@ using namespace std;
 
 ComplexSpectrogramFilter::ComplexSpectrogramFilter(const string& color)
 	: SpectrogramFilter(color)
-	, m_centerFreqName("Center Frequency")
 {
 	//remove base class ports
 	m_signalNames.clear();
@@ -48,19 +47,17 @@ ComplexSpectrogramFilter::ComplexSpectrogramFilter(const string& color)
 	//Set up channels
 	CreateInput("I");
 	CreateInput("Q");
+	CreateInput("center");
 
 	m_blackmanHarrisComputePipeline.Reinitialize(
 		"shaders/ComplexBlackmanHarrisWindow.spv", 3, sizeof(WindowFunctionArgs));
 	m_rectangularComputePipeline.Reinitialize(
 		"shaders/ComplexRectangularWindow.spv", 3, sizeof(WindowFunctionArgs));
 	m_cosineSumComputePipeline.Reinitialize(
-		"shaders/CosineSumWindow.spv", 3, sizeof(WindowFunctionArgs));
+		"shaders/ComplexCosineSumWindow.spv", 3, sizeof(WindowFunctionArgs));
 
 	m_postprocessComputePipeline.Reinitialize(
 		"shaders/ComplexSpectrogramPostprocess.spv", 2, sizeof(SpectrogramPostprocessArgs));
-
-	m_parameters[m_centerFreqName] = FilterParameter(FilterParameter::TYPE_INT, Unit(Unit::UNIT_HZ));
-	m_parameters[m_centerFreqName].SetIntVal(0);
 }
 
 ComplexSpectrogramFilter::~ComplexSpectrogramFilter()
@@ -72,13 +69,22 @@ ComplexSpectrogramFilter::~ComplexSpectrogramFilter()
 
 bool ComplexSpectrogramFilter::ValidateChannel(size_t i, StreamDescriptor stream)
 {
-	if(stream.m_channel == NULL)
+	if(stream.m_channel == nullptr)
 		return false;
 
-	if( (i < 2) && (stream.GetType() == Stream::STREAM_TYPE_ANALOG) )
-		return true;
+	switch(i)
+	{
+		case 0:
+		case 1:
+			return (stream.GetType() == Stream::STREAM_TYPE_ANALOG);
 
-	return false;
+		case 2:
+			return	(stream.GetType() == Stream::STREAM_TYPE_ANALOG_SCALAR) &&
+					(stream.GetYAxisUnits() == Unit(Unit::UNIT_HZ));
+
+		default:
+			return false;
+	}
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -118,13 +124,15 @@ void ComplexSpectrogramFilter::ReallocateBuffers(size_t fftlen, size_t nblocks)
 void ComplexSpectrogramFilter::Refresh(vk::raii::CommandBuffer& cmdBuf, shared_ptr<QueueHandle> queue)
 {
 	//Make sure we've got valid inputs
-	if(!VerifyAllInputsOKAndUniformAnalog())
-	{
-		SetData(NULL, 0);
-		return;
-	}
 	auto din_i = dynamic_cast<UniformAnalogWaveform*>(GetInputWaveform(0));
 	auto din_q = dynamic_cast<UniformAnalogWaveform*>(GetInputWaveform(1));
+	auto din_freq = GetInput(2);
+	if(!din_i || !din_q || !din_freq)
+	{
+		SetData(nullptr, 0);
+		return;
+	}
+	auto centerFrequency = din_freq.GetScalarValue();
 
 	//Figure out how many FFTs to do
 	//For now, consecutive blocks and not a sliding window
@@ -149,7 +157,6 @@ void ComplexSpectrogramFilter::Refresh(vk::raii::CommandBuffer& cmdBuf, shared_p
 	LogTrace("%s per bin\n", hz.PrettyPrint(bin_hz).c_str());
 
 	//Base frequency is center frequency minus half the FFT range
-	auto centerFrequency = m_parameters[m_centerFreqName].GetIntVal();
 	int64_t baseFrequency = centerFrequency - bin_hz * (fftlen/2);
 
 	//Create the output
@@ -269,10 +276,11 @@ void ComplexSpectrogramFilter::Refresh(vk::raii::CommandBuffer& cmdBuf, shared_p
 		args.offsetIn = block*fftlen;
 		args.offsetOut = block*fftlen;
 
+		const uint32_t compute_block_count = GetComputeBlockCount(fftlen, 64);
 		if(block == 0)
-			wpipe->Dispatch(cmdBuf, args, GetComputeBlockCount(fftlen, 64));
+			wpipe->Dispatch(cmdBuf, args, min(compute_block_count, 32768u), compute_block_count / 32768 + 1);
 		else
-			wpipe->DispatchNoRebind(cmdBuf, args, GetComputeBlockCount(fftlen, 64));
+			wpipe->DispatchNoRebind(cmdBuf, args, min(compute_block_count, 32768u), compute_block_count / 32768 + 1);
 	}
 	wpipe->AddComputeMemoryBarrier(cmdBuf);
 
@@ -297,12 +305,16 @@ void ComplexSpectrogramFilter::Refresh(vk::raii::CommandBuffer& cmdBuf, shared_p
 	m_postprocessComputePipeline.AddComputeMemoryBarrier(cmdBuf);
 	m_postprocessComputePipeline.BindBufferNonblocking(0, m_rdoutbuf, cmdBuf);
 	m_postprocessComputePipeline.BindBufferNonblocking(1, cap->GetOutData(), cmdBuf, true);
+	size_t xsize = GetComputeBlockCount(nouts, 64);
+	size_t ysize = ceil(nblocks * 1.0 / postargs.ygrid);
+	size_t zsize = postargs.ygrid;
+	//LogDebug("ComplexSpectrogramFilter: grid %zu x %zu x %zu\n", xsize, ysize, zsize);
 	m_postprocessComputePipeline.Dispatch(
 		cmdBuf,
 		postargs,
-		GetComputeBlockCount(nouts, 64),
-		ceil(nblocks * 1.0 / postargs.ygrid),
-		postargs.ygrid
+		xsize,
+		ysize,
+		zsize
 		);
 
 	//Done, block until the compute operations finish

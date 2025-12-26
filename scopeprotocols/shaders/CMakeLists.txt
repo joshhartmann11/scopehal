@@ -30,6 +30,8 @@ add_compute_shaders(
 	protocolshaders
 	SOURCES
 		AddFilter.glsl
+		ACRMS.glsl
+		ACRMS_Trend.glsl
 		BlackmanHarrisWindow.glsl
 		ComplexBlackmanHarrisWindow.glsl
 		ComplexCosineSumWindow.glsl
@@ -45,6 +47,7 @@ add_compute_shaders(
 		SubtractFilter.glsl
 		SubtractInPlace.glsl
 		SubtractOutOfPlace.glsl
+		Threshold.glsl
 		UpsampleFilter.glsl
 		WaterfallFilter.glsl
 	)

@@ -2,7 +2,7 @@
 *                                                                                                                      *
 * libscopeprotocols                                                                                                    *
 *                                                                                                                      *
-* Copyright (c) 2012-2023 Andrew D. Zonenberg and contributors                                                         *
+* Copyright (c) 2012-2025 Andrew D. Zonenberg and contributors                                                         *
 * All rights reserved.                                                                                                 *
 *                                                                                                                      *
 * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
@@ -55,7 +55,6 @@ public:
 
 	virtual void ClearSweeps() override;
 
-	void RecalculateUIWidth();
 	EyeWaveform* ReallocateWaveform();
 
 	void SetWidth(size_t width)
@@ -121,6 +120,8 @@ public:
 protected:
 	void DoMaskTest(EyeWaveform* cap);
 
+	void RecalculateUIWidth(std::vector<int64_t>& clock_edges, EyeWaveform* cap);
+
 	void SparsePackedInnerLoop(
 		SparseAnalogWaveform* waveform,
 		std::vector<int64_t>& clock_edges,
@@ -149,6 +150,32 @@ protected:
 
 #ifdef __x86_64__
 	void DensePackedInnerLoopAVX2(
+		UniformAnalogWaveform* waveform,
+		std::vector<int64_t>& clock_edges,
+		int64_t* data,
+		size_t wend,
+		size_t cend,
+		int32_t xmax,
+		int32_t ymax,
+		float xtimescale,
+		float yscale,
+		float yoff
+		);
+
+	void DensePackedInnerLoopAVX2FMA(
+		UniformAnalogWaveform* waveform,
+		std::vector<int64_t>& clock_edges,
+		int64_t* data,
+		size_t wend,
+		size_t cend,
+		int32_t xmax,
+		int32_t ymax,
+		float xtimescale,
+		float yscale,
+		float yoff
+		);
+
+	void DensePackedInnerLoopAVX512F(
 		UniformAnalogWaveform* waveform,
 		std::vector<int64_t>& clock_edges,
 		int64_t* data,

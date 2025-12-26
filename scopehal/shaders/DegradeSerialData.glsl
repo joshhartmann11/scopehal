@@ -1,8 +1,8 @@
 /***********************************************************************************************************************
 *                                                                                                                      *
-* libscopehal                                                                                                          *
+* libscopeprotocols                                                                                                    *
 *                                                                                                                      *
-* Copyright (c) 2012-2024 Andrew D. Zonenberg and contributors                                                         *
+* Copyright (c) 2012-2025 Andrew D. Zonenberg and contributors                                                         *
 * All rights reserved.                                                                                                 *
 *                                                                                                                      *
 * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
@@ -26,54 +26,77 @@
 * POSSIBILITY OF SUCH DAMAGE.                                                                                          *
 *                                                                                                                      *
 ***********************************************************************************************************************/
-/**
-	@file
-	@author Mike Walters
-	@brief Declaration of SCPILinuxGPIBTransport
- */
 
-#ifdef HAS_LINUXGPIB
+#version 430
+#pragma shader_stage(compute)
 
-#ifndef SCPILinuxGPIBTransport_h
-#define SCPILinuxGPIBTransport_h
-
-/**
-	@brief Abstraction of a transport layer for moving SCPI data between endpoints
- */
-class SCPILinuxGPIBTransport : public SCPITransport
+layout(std430, binding=0) restrict writeonly buffer buf_dout
 {
-public:
-	SCPILinuxGPIBTransport(const std::string& args);
-	~SCPILinuxGPIBTransport();
-
-	//not copyable or assignable
-	SCPILinuxGPIBTransport(const SCPILinuxGPIBTransport&) =delete;
-	SCPILinuxGPIBTransport& operator=(const SCPILinuxGPIBTransport&) =delete;
-
-	std::string GetConnectionString() override;
-	static std::string GetTransportName();
-
-	void FlushRXBuffer(void) override;
-	bool SendCommand(const std::string& cmd) override;
-	std::string ReadReply(bool endOnSemicolon = true, std::function<void(float)> progress = nullptr) override;
-	size_t ReadRawData(size_t len, unsigned char* buf, std::function<void(float)> progress = nullptr) override;
-	void SendRawData(size_t len, const unsigned char* buf) override;
-
-	bool IsCommandBatchingSupported() override;
-	bool IsConnected() override;
-
-	TRANSPORT_INITPROC(SCPILinuxGPIBTransport)
-
-protected:
-	std::string m_devicePath;
-
-	int m_handle = -1;
-	int m_board_index;
-	int m_pad;
-	int m_sad = 0;
-	int m_timeout = 10;
+	float dout[];
 };
 
-#endif
+layout(std430, binding=1) restrict readonly buffer buf_din
+{
+	float din[];
+};
 
-#endif
+layout(std430, push_constant) uniform constants
+{
+	uint numSamples;
+	uint samplesPerThread;
+	uint rngSeed;
+	uint inputOffset;
+	float scale;
+	float sigma;
+};
+
+layout(local_size_x=64, local_size_y=1, local_size_z=1) in;
+
+void main()
+{
+	//Base thread ID
+	uint nthread = (gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x) + gl_GlobalInvocationID.x;
+
+	//Bounds for our generation
+	uint istart = nthread * samplesPerThread;
+	uint iend = istart + samplesPerThread;
+	if(iend >= numSamples)
+		iend = numSamples - 1;
+
+	const float twopi = 2 * 3.1415926535;
+
+	//Create the output
+	uint lcgState = rngSeed + nthread;
+	for(uint i=istart; i <= iend; i += 2)
+	{
+		//Generate two pseudorandom uint32's with the first being nonzero
+		//Use glibc rand() parameters
+		uint rngOut[2] = {0, 0};
+		uint rngmax = 0xffffff;
+		for(uint j=0; j<2; j++)
+		{
+			while(rngOut[j] == 0)
+			{
+				lcgState = ( (lcgState * 1103515245) + 12345 ) & 0x7fffffff;
+				rngOut[j] = lcgState & rngmax;
+
+				if(j == 1)
+					break;
+			}
+		}
+
+		//Convert the random ints to floats in [0, 1]
+		float u1 = float(rngOut[0]) / float(rngmax);
+		float u2 = float(rngOut[1]) / float(rngmax);
+
+		//Convert to uniform distribution using Box-Muller
+		float mag = sigma * sqrt(-2 * log(u1));
+		float noise0 = mag * cos(twopi * u2);
+		float noise1 = mag * sin(twopi * u2);
+
+		//Generate the output (second sample needs separate bounds check)
+		dout[i] = (din[i + inputOffset] * scale) + noise0;
+		if(i+1 <= iend)
+			dout[i+1] = (din[i + 1 + inputOffset] * scale) + noise1;
+	}
+}

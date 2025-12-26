@@ -2,7 +2,7 @@
 *                                                                                                                      *
 * libscopeprotocols                                                                                                    *
 *                                                                                                                      *
-* Copyright (c) 2012-2024 Andrew D. Zonenberg and contributors                                                         *
+* Copyright (c) 2012-2025 Andrew D. Zonenberg and contributors                                                         *
 * All rights reserved.                                                                                                 *
 *                                                                                                                      *
 * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
@@ -29,6 +29,7 @@
 
 #include "../scopehal/scopehal.h"
 #include "CSVImportFilter.h"
+#include <charconv>
 
 using namespace std;
 
@@ -83,38 +84,81 @@ void CSVImportFilter::OnFileNameChanged()
 	int64_t fs = 0;
 	GetTimestampOfFile(fname, timestamp, fs);
 
-	FILE* fp = fopen(fname.c_str(), "r");
+	double start = GetTime();
+
+	//Read the entire file into a buffer
+	//Read it as binary because "read whole file" is problematic in text mode
+	//since length can change and we'll get less than we asked for
+	//(see https://github.com/ngscopeclient/scopehal/issues/1002)
+	FILE* fp = fopen(fname.c_str(), "rb");
 	if(!fp)
 	{
 		LogError("Couldn't open CSV file \"%s\"\n", fname.c_str());
 		return;
 	}
+	fseek(fp, 0, SEEK_END);
+	size_t flen = ftell(fp);
+	fseek(fp, 0, SEEK_SET);
+	char* buf = new char[flen+1];
+	if(flen != fread(buf, 1, flen, fp))
+	{
+		LogError("file read error\n");
+		return;
+	}
+	buf[flen] = '\0';	//guarantee null termination at end of file
+	fclose(fp);
 
 	ClearStreams();
 
 	//Read the file
+	//More natural implementation is lots of lines, but that's expensive. Columnar structure has less allocations
 	vector<string> names;
-	vector< vector<string> > lines;
+	vector< vector<char*> > vcolumns;
 	vector<int64_t> timestamps;
-	char line[1024];
 	bool digilentFormat;
 	size_t nrow = 0;
 	size_t ncols = 0;
-	while(!feof(fp))
+	char* pbuf = buf;
+	char* pend = buf + flen;
+	bool xUnitIsFs = m_parameters[m_xunit].GetIntVal() == Unit::UNIT_FS;
+	while(true)
 	{
-		if(!fgets(line, sizeof(line), fp))
-			break;
-
 		nrow ++;
 
-		//Discard blank lines
-		string s = Trim(line);
-		if(s.empty())
+		//Stop if at end of file
+		char* pline = pbuf;
+		if(pline >= pend)
+			break;
+
+		//Find first non-blank character in the current line
+		while(isspace(*pline))
+			pline ++;
+
+		//If it's a newline or nul, the line was blank - discard it
+		if( (*pline == '\0') || (*pline == '\n') || (*pline == '\r') )
+		{
+			pbuf ++;
 			continue;
+		}
+
+		//Search until we find the end of the line, then trim the trailing newline if there is one
+		size_t slen = 0;
+		for(; (pline + slen) < pend; slen++)
+		{
+			if(pline[slen] == '\0')
+				break;
+			if( (pline[slen] == '\n') || (pline[slen] == '\r') )
+			{
+				pline[slen] = '\0';
+				break;
+			}
+		}
+		pbuf += slen;
 
 		//If the line starts with a #, it's a comment. Discard it, but save timestamp metadata if present
-		if(s[0] == '#')
+		if(pline[0] == '#')
 		{
+			string s = pline;
 			if(s == "#Digilent WaveForms Oscilloscope Acquisition")
 			{
 				digilentFormat = true;
@@ -165,40 +209,54 @@ void CSVImportFilter::OnFileNameChanged()
 		}
 
 		//Parse into 2D vector of timestamps and strings
-		string tmp;
+		size_t fieldstart = 0;
 		bool foundTimestamp = false;
-		vector<string> fields;
+		vector<string> headerfields;
 		bool headerRow = false;
-		for(size_t i=0; i<s.length(); i++)
+		size_t ncol = 0;
+		for(size_t i=0; i<=slen; i++)
 		{
 			//End of field
-			if( (s[i] == ',') || (s[i] == '\n') )
+			if( (pline[i] == ',') || (pline[i] == '\n') || (pline[i] == '\r') || (pline[i] == '\0') )
 			{
 				//If this is the first row, check if it's numeric
 				if(names.empty() && timestamps.empty())
 				{
 					//See if it's a header row
-					for(size_t j=0; (j<sizeof(line)) && (line[j] != '\0'); j++)
+					if(!headerRow)
 					{
-						auto c = line[j];
-						if(	!isdigit(c) && !isspace(c) &&
-							(c != ',') && (c != '.') && (c != '-') && (c != 'e') && (c != '+'))
+						for(size_t j=0; pline[j] != '\0'; j++)
 						{
-							headerRow = true;
-							auto trimline = Trim(line);
-							LogTrace("Found header row: %s\n", trimline.c_str());
-							break;
+							auto c = pline[j];
+							if(	!isdigit(c) && !isspace(c) &&
+								(c != ',') && (c != '.') && (c != '-') && (c != 'e') && (c != '+'))
+							{
+								headerRow = true;
+								auto trimline = Trim(pline);
+								LogTrace("Found header row: %s\n", trimline.c_str());
+								break;
+							}
 						}
 					}
 
 					//Save the header values
 					if(headerRow)
-						fields.push_back(tmp);
+					{
+						string s(pline);
+						headerfields.push_back(s.substr(fieldstart, i-fieldstart));
+					}
 				}
 
 				//If this is a header row, don't also try to parse it as a timestamp
 				if(headerRow)
+				{
+					//Start a new field
+					fieldstart = i+1;
 					continue;
+				}
+
+				//Replace the delimiter with a nul
+				pline[i] = '\0';
 
 				//Load timestamp
 				if(!foundTimestamp)
@@ -206,60 +264,73 @@ void CSVImportFilter::OnFileNameChanged()
 					foundTimestamp = true;
 
 					//Parse time to a float and convert to fs
-					if(m_parameters[m_xunit].GetIntVal() == Unit::UNIT_FS)
+					if(xUnitIsFs)
 					{
-						double timeSec;
-						if(tmp.find("e") == string::npos)
-							sscanf(tmp.c_str(), "%lf", &timeSec);
-						else
-							sscanf(tmp.c_str(), "%le", &timeSec);
-						timestamps.push_back(FS_PER_SECOND * timeSec);
+						//TODO: use fastfloat lib here
+						#ifdef __APPLE__
+							timestamps.push_back(FS_PER_SECOND * strtof(pline+i, nullptr));
+						#else
+							float tmp;
+							from_chars(pline+fieldstart, pline+i, tmp, std::chars_format::general);
+							timestamps.push_back(FS_PER_SECOND * tmp);
+						#endif
 					}
 
 					//other units are as-is
 					else
-						timestamps.push_back(stoll(tmp));
+						timestamps.push_back(strtoll(pline+fieldstart, nullptr, 10));
 				}
 
 				//Data field. Save it
 				else
-					fields.push_back(tmp);
-				tmp = "";
-			}
+				{
+					if(vcolumns.size() <= ncol)
+						vcolumns.resize(ncol+1);
+					vcolumns[ncol].push_back(pline+fieldstart);
 
-			//Add to field
-			else
-				tmp += s[i];
+					ncol ++;
+				}
+
+				//Start a new field
+				fieldstart = i+1;
+			}
 		}
-		if(tmp != "")
-			fields.push_back(tmp);
+		if(fieldstart < slen)
+		{
+			if(vcolumns.size() <= ncol)
+				vcolumns.resize(ncol+1);
+			vcolumns[ncol].push_back(pline+fieldstart);
+
+			ncol ++;
+		}
 
 		//Header row gets special treatment
 		if(headerRow)
 		{
 			//delete name of timestamp column
-			fields.erase(fields.begin());
-
-			names = fields;
+			headerfields.erase(headerfields.begin());
+			names = headerfields;
 			continue;
 		}
 
 		//Sanity check field count
 		if(ncols == 0)
-			ncols = fields.size();
-		else if(ncols != fields.size())
+			ncols = ncol;
+		else if(ncol != ncols)
 		{
 			LogError("Malformed file (line %zu contains %zu fields, but file started with %zu fields)\n",
-				nrow, fields.size(), ncols);
-			break;
+				nrow, ncol, ncols);
+			return;
 		}
-
-		lines.push_back(fields);
 	}
+
+	if(ncols == 0)
+		return;
+	size_t nrows = min(vcolumns[0].size(), timestamps.size());
 
 	//Assign default names to channels if there's no header row or not enough names
 	LogTrace("Initial parsing completed, %zu lines, %zu columns, %zu names, %zu timestamps\n",
-		lines.size(), ncols, names.size(), timestamps.size());
+		nrows, ncols, names.size(), timestamps.size());
 	for(size_t i=0; i<ncols; i++)
 	{
 		if(names.size() <= i)
@@ -275,10 +346,10 @@ void CSVImportFilter::OnFileNameChanged()
 
 		//Assume digital, then change to analog if we see anything other than a 0/1 in the first 10 lines
 		bool digital = true;
-		for(size_t j=0; j<lines.size() && j<10; j++)
+		for(size_t j=0; j<nrows && j<10; j++)
 		{
-			string field = lines[j][i];
-			if( (field != "0") && (field != "1") )
+			auto field = vcolumns[i][j];
+			if( (field[0] != '0' && field[0] != '1') || field[1] != '\0')
 			{
 				digital = false;
 				break;
@@ -295,11 +366,11 @@ void CSVImportFilter::OnFileNameChanged()
 			wfm->m_startTimestamp = timestamp;
 			wfm->m_startFemtoseconds = fs;
 			wfm->m_triggerPhase = 0;
-			wfm->Resize(lines.size());
+			wfm->Resize(nrows);
 			digwaves.push_back(wfm);
 
 			//no analog waveform
-			anwaves.push_back(NULL);
+			anwaves.push_back(nullptr);
 			SetData(wfm, i);
 		}
 		else
@@ -315,11 +386,11 @@ void CSVImportFilter::OnFileNameChanged()
 			wfm->m_startTimestamp = timestamp;
 			wfm->m_startFemtoseconds = fs;
 			wfm->m_triggerPhase = 0;
-			wfm->Resize(lines.size());
+			wfm->Resize(nrows);
 			anwaves.push_back(wfm);
 
 			//no digital waveform
-			digwaves.push_back(NULL);
+			digwaves.push_back(nullptr);
 			SetData(wfm, i);
 		}
 	}
@@ -334,13 +405,12 @@ void CSVImportFilter::OnFileNameChanged()
 			auto wfm = digwaves[i];
 
 			//Read the sample data
-			auto nlines = min(lines.size(), timestamps.size());
-			for(size_t j=0; j<nlines; j++)
+			for(size_t j=0; j<nrows; j++)
 			{
 				wfm->m_offsets[j] = timestamps[j];
 
 				//Last one? copy previous sample duration
-				if(j+1 == lines.size())
+				if(j+1 == nrows)
 					wfm->m_durations[j] = wfm->m_durations[j-1];
 
 				//Set sample duration of previous sample
@@ -348,7 +418,7 @@ void CSVImportFilter::OnFileNameChanged()
 					wfm->m_durations[j-1] = wfm->m_offsets[j] - wfm->m_offsets[j-1];
 
 				//Read waveform data
-				if(lines[j][i] == "1")
+				if(vcolumns[i][j][0] == '1')
 					wfm->m_samples[j] = true;
 				else
 					wfm->m_samples[j] = false;
@@ -376,13 +446,12 @@ void CSVImportFilter::OnFileNameChanged()
 			auto wfm = anwaves[i];
 
 			//Read the sample data
-			auto nlines = min(lines.size(), timestamps.size());
-			for(size_t j=0; j<nlines; j++)
+			for(size_t j=0; j<nrows; j++)
 			{
 				wfm->m_offsets[j] = timestamps[j];
 
 				//Last one? copy previous sample duration
-				if(j+1 == lines.size())
+				if(j+1 == nrows)
 					wfm->m_durations[j] = wfm->m_durations[j-1];
 
 				//Set sample duration of previous sample
@@ -390,13 +459,15 @@ void CSVImportFilter::OnFileNameChanged()
 					wfm->m_durations[j-1] = wfm->m_offsets[j] - wfm->m_offsets[j-1];
 
 				//Read waveform data
-				float v;
-				auto tmp = lines[j][i];
-				if(tmp.find("e") == string::npos)
-					sscanf(tmp.c_str(), "%f", &v);
-				else
-					sscanf(tmp.c_str(), "%e", &v);
-				wfm->m_samples[j] = v;
+				//TODO: faster to save length in vcolumns vs recomputing here?
+				float tmp;
+				const char* vline = vcolumns[i][j];
+				#ifdef __APPLE__
+					tmp = strtof(vline, nullptr);
+				#else
+					from_chars(vline, vline+strlen(vline), tmp, std::chars_format::general);
+				#endif
+				wfm->m_samples[j] = tmp;
 			}
 
 			if(TryNormalizeTimebase(wfm))
@@ -415,4 +486,9 @@ void CSVImportFilter::OnFileNameChanged()
 			}
 		}
 	}
+
+	double dt = GetTime() - start;
+	LogTrace("CSV loading took %.3f sec\n", dt);
+
+	delete[] buf;
 }

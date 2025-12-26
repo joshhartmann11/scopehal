@@ -2,7 +2,7 @@
 *                                                                                                                      *
 * libscopehal                                                                                                          *
 *                                                                                                                      *
-* Copyright (c) 2012-2024 Andrew D. Zonenberg and contributors                                                         *
+* Copyright (c) 2012-2025 Andrew D. Zonenberg and contributors                                                         *
 * All rights reserved.                                                                                                 *
 *                                                                                                                      *
 * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
@@ -36,6 +36,8 @@
 #ifndef IDTable_h
 #define IDTable_h
 
+#include "SerializableObject.h"
+
 /**
 	@brief Bidirectional table mapping integer IDs in scopesession files to object pointers
 	@ingroup core
@@ -45,7 +47,7 @@
 
 	TODO: can we store RTTI info along with the objects to sanity check that we're using the right kind of object
  */
-class IDTable : public Bijection<uintptr_t, void*>
+class IDTable : public Bijection<uintptr_t, SerializableObject*>
 {
 public:
 	IDTable()
@@ -61,7 +63,7 @@ public:
 
 		@return The ID of the object
 	 */
-	uintptr_t emplace(void* p)
+	uintptr_t emplace(SerializableObject* p)
 	{
 		if(HasID(p))
 			return m_reverseMap[p];
@@ -77,7 +79,7 @@ public:
 		@param id		ID to assign to the object
 		@param p		Pointer to the object
 	 */
-	void emplace(uintptr_t id, void* p)
+	void emplace(uintptr_t id, SerializableObject* p)
 	{
 		ReserveID(id);
 		Bijection::emplace(id, p);
@@ -88,7 +90,7 @@ public:
 
 		@param p		Pointer to the object
 	 */
-	bool HasID(void* p)
+	bool HasID(SerializableObject* p)
 	{ return (m_reverseMap.find(p) != m_reverseMap.end()); }
 
 	/**
@@ -106,9 +108,25 @@ public:
 	{ m_nextID = std::max(m_nextID, id+1); }
 
 	/**
+		@brief Type-safe object lookup
+	 */
+	template<class T>
+	T Lookup(uintptr_t id)
+	{ return dynamic_cast<T>(m_forwardMap[id]); }
+
+	///@brief Legacy object lookup
+	[[deprecated]]
+	SerializableObject* operator[](uintptr_t key)
+	{ return m_forwardMap[key]; }
+
+	///@brief Forward lookup
+	uintptr_t operator[](SerializableObject* key)
+	{ return m_reverseMap[key]; }
+
+	/**
 		@brief Deletes all entries from the table
 	 */
-	void clear()
+	virtual void clear()
 	{
 		m_forwardMap.clear();
 		m_reverseMap.clear();

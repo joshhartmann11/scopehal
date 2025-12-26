@@ -2,7 +2,7 @@
 *                                                                                                                      *
 * libscopeprotocols                                                                                                    *
 *                                                                                                                      *
-* Copyright (c) 2012-2022 Andrew D. Zonenberg and contributors                                                         *
+* Copyright (c) 2012-2025 Andrew D. Zonenberg and contributors                                                         *
 * All rights reserved.                                                                                                 *
 *                                                                                                                      *
 * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
@@ -40,7 +40,7 @@ class Ethernet100BaseTXDecoder : public EthernetProtocolDecoder
 public:
 	Ethernet100BaseTXDecoder(const std::string& color);
 
-	virtual void Refresh() override;
+	virtual void Refresh(vk::raii::CommandBuffer& cmdBuf, std::shared_ptr<QueueHandle> queue) override;
 	static std::string GetProtocolName();
 
 	virtual bool ValidateChannel(size_t i, StreamDescriptor stream) override;
@@ -48,10 +48,19 @@ public:
 	PROTOCOL_DECODER_INITPROC(Ethernet100BaseTXDecoder)
 
 protected:
-	int GetState(float voltage);
+	int GetState(float voltage)
+	{
+		if(voltage > 0.5)
+			return 1;
+		else if(voltage < -0.5)
+			return -1;
+		else
+			return 0;
+	}
+
 	bool TrySync(
-		SparseDigitalWaveform& bits,
-		SparseDigitalWaveform& descrambled_bits,
+		std::vector<uint8_t>& bits,
+		std::vector<uint8_t>& descrambled_bits,
 		size_t idle_offset,
 		size_t stop);
 };

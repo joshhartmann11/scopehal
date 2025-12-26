@@ -2,7 +2,7 @@
 *                                                                                                                      *
 * libscopehal                                                                                                          *
 *                                                                                                                      *
-* Copyright (c) 2012-2024 Andrew D. Zonenberg and contributors                                                         *
+* Copyright (c) 2012-2025 Andrew D. Zonenberg and contributors                                                         *
 * All rights reserved.                                                                                                 *
 *                                                                                                                      *
 * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
@@ -219,6 +219,14 @@ void LeCroyOscilloscope::IdentifyHardware()
 		m_modelid = MODEL_SDA_3K;
 		m_maxBandwidth = 3000;
 	}
+	else if(m_model.find("SDA7") == 0)
+	{
+		if(m_model.find("ZI-A") != string::npos)
+			m_modelid = MODEL_SDA_7ZI_A;
+		else
+			m_model = MODEL_SDA_7ZI;
+		m_maxBandwidth = stoi(m_model.substr(4, 2)) * 100;
+	}
 	else if(m_model.find("WM8") == 0)
 	{
 		if(m_model.find("ZI-B") != string::npos)
@@ -425,7 +433,7 @@ void LeCroyOscilloscope::DetectOptions()
 				action = "Enabled";
 			}
 
-			//Memory capacity options for WaveMaster/SDA/DDA 8Zi/Zi-A/Zi-B family
+			//Memory capacity options for WaveMaster/SDA/DDA 8Zi/Zi-A/Zi-B family (seems like 7Zi has this too)
 			else if(o == "-S")
 			{
 				type = "Hardware";
@@ -433,7 +441,7 @@ void LeCroyOscilloscope::DetectOptions()
 				m_memoryDepthOption = 32;
 				action = "Enabled";
 			}
-			else if(o == "-S")
+			else if(o == "-M")
 			{
 				type = "Hardware";
 				desc = "Medium (64M point) memory";
@@ -912,7 +920,9 @@ void LeCroyOscilloscope::DetectAnalogChannels()
 			nchans = 4;
 			break;
 
-		//All SDA / WaveMaster 8Zi have 4 channels
+		//All SDA / WaveMaster 7Zi and 8Zi have 4 channels
+		case MODEL_SDA_7ZI:
+		case MODEL_SDA_7ZI_A:
 		case MODEL_SDA_8ZI:
 		case MODEL_SDA_8ZI_A:
 		case MODEL_SDA_8ZI_B:
@@ -1065,6 +1075,7 @@ void LeCroyOscilloscope::FlushConfigCache()
 	m_channelsEnabled.clear();
 	m_channelDeskew.clear();
 	m_probeIsActive.clear();
+	m_channelIsInverted.clear();
 	m_channelNavg.clear();
 	m_sampleRateValid = false;
 	m_memoryDepthValid = false;
@@ -1199,6 +1210,7 @@ bool LeCroyOscilloscope::IsChannelEnabled(size_t i)
 	else
 		return false;
 
+	lock_guard<recursive_mutex> lock2(m_cacheMutex);
 	return m_channelsEnabled[i];
 }
 
@@ -1253,6 +1265,7 @@ void LeCroyOscilloscope::EnableChannel(size_t i)
 		m_transport->SendCommandQueued(tmp);
 	}
 
+	lock_guard<recursive_mutex> lock2(m_cacheMutex);
 	m_channelsEnabled[i] = true;
 }
 
@@ -1284,6 +1297,9 @@ bool LeCroyOscilloscope::CanEnableChannel(size_t i)
 		case MODEL_HDO_4KA:
 		case MODEL_WAVERUNNER_8K:
 		case MODEL_WAVERUNNER_8K_HD:		//TODO: seems like multiple levels of interleaving possible
+		case MODEL_SDA_7ZI:
+		case MODEL_SDA_7ZI_A:
+		case MODEL_SDA_8ZI:
 		case MODEL_SDA_8ZI_A:
 		case MODEL_SDA_8ZI_B:
 		case MODEL_WAVEMASTER_8ZI_A:
@@ -1528,6 +1544,15 @@ vector<unsigned int> LeCroyOscilloscope::GetChannelBandwidthLimiters(size_t /*i*
 			ret.push_back(1000);
 			break;
 
+		case MODEL_SDA_7ZI:
+		case MODEL_SDA_7ZI_A:
+			ret.push_back(1000);
+			if(m_maxBandwidth >= 4000)
+				ret.push_back(3000);
+			if(m_maxBandwidth >= 6000)
+				ret.push_back(4000);
+			break;
+
 		case MODEL_WAVEMASTER_8ZI:
 		case MODEL_WAVEMASTER_8ZI_A:
 		case MODEL_WAVEMASTER_8ZI_B:
@@ -1652,6 +1677,14 @@ void LeCroyOscilloscope::Invert(size_t i, bool invert)
 		m_transport->SendCommandQueued(string("VBS 'app.Acquisition.") + GetOscilloscopeChannel(i)->GetHwname() + ".Invert = true'");
 	else
 		m_transport->SendCommandQueued(string("VBS 'app.Acquisition.") + GetOscilloscopeChannel(i)->GetHwname() + ".Invert = false'");
+
+	{
+		lock_guard<recursive_mutex> lock(m_cacheMutex);
+		m_channelIsInverted[i] = invert;
+	}
+
+	//When changing inversion status, refresh the trigger in case the trigger source was inverted
+	PullTrigger();
 }
 
 bool LeCroyOscilloscope::IsInverted(size_t i)
@@ -1659,9 +1692,23 @@ bool LeCroyOscilloscope::IsInverted(size_t i)
 	if(i >= m_analogChannelCount)
 		return false;
 
+	//Check cache
+	{
+		lock_guard<recursive_mutex> lock(m_cacheMutex);
+		auto it = m_channelIsInverted.find(i);
+		if(it != m_channelIsInverted.end())
+			return it->second;
+	}
+
 	auto reply = Trim(m_transport->SendCommandQueuedWithReply(
 		string("VBS? 'return = app.Acquisition.") + GetOscilloscopeChannel(i)->GetHwname() + ".Invert'"));
-	return (reply == "-1");
+	bool inverted = (reply == "-1");
+
+	{
+		lock_guard<recursive_mutex> lock(m_cacheMutex);
+		m_channelIsInverted[i] = inverted;
+	}
+	return inverted;
 }
 
 string LeCroyOscilloscope::GetProbeName(size_t i)
@@ -1749,6 +1796,8 @@ bool LeCroyOscilloscope::HasInputMux(size_t i)
 	switch(m_modelid)
 	{
 		//Add other models with muxes here
+		case MODEL_SDA_7ZI:
+		case MODEL_SDA_7ZI_A:
 		case MODEL_SDA_8ZI:
 		case MODEL_SDA_8ZI_A:
 		case MODEL_SDA_8ZI_B:
@@ -2814,6 +2863,12 @@ bool LeCroyOscilloscope::AcquireData()
 			}
 		}
 
+		//If we are using a CDR trigger, for some reason timestamps don't work
+		//https://github.com/ngscopeclient/scopehal/issues/959
+		//Unless LeCroy gets us a better workaround (TLC#00367891), just use clientside clock
+		if(dynamic_cast<CDRTrigger*>(GetTrigger()) != nullptr)
+			useClientsideTimestamp = true;
+
 		//See if any digital channels are enabled
 		if(m_digitalChannelCount > 0)
 		{
@@ -3043,6 +3098,10 @@ float LeCroyOscilloscope::GetChannelOffset(size_t i, size_t /*stream*/)
 	float offset;
 	sscanf(reply.c_str(), "%f", &offset);
 
+	//Correct for frontend inversion
+	if(IsInverted(i))
+		offset = -offset;
+
 	lock_guard<recursive_mutex> lock(m_cacheMutex);
 	m_channelOffsets[i] = offset;
 	return offset;
@@ -3055,7 +3114,10 @@ void LeCroyOscilloscope::SetChannelOffset(size_t i, size_t /*stream*/, float off
 		return;
 
 	char tmp[128];
-	snprintf(tmp, sizeof(tmp), "%s:OFFSET %f", GetOscilloscopeChannel(i)->GetHwname().c_str(), offset);
+	if(IsInverted(i))
+		snprintf(tmp, sizeof(tmp), "%s:OFFSET %f", GetOscilloscopeChannel(i)->GetHwname().c_str(), -offset);
+	else
+		snprintf(tmp, sizeof(tmp), "%s:OFFSET %f", GetOscilloscopeChannel(i)->GetHwname().c_str(), offset);
 	m_transport->SendCommandQueued(tmp);
 
 	lock_guard<recursive_mutex> lock(m_cacheMutex);
@@ -3116,6 +3178,9 @@ vector<uint64_t> LeCroyOscilloscope::GetSampleRatesNonInterleaved()
 		if(m_modelid == MODEL_WAVERUNNER_8K)
 			ret.push_back(1000);
 
+		bool wm7 =
+			(m_modelid == MODEL_SDA_7ZI) ||
+			(m_modelid == MODEL_SDA_7ZI_A);
 		bool wm8 =
 			(m_modelid == MODEL_WAVEMASTER_8ZI_B) ||
 			(m_modelid == MODEL_SDA_8ZI) ||
@@ -3146,7 +3211,7 @@ vector<uint64_t> LeCroyOscilloscope::GetSampleRatesNonInterleaved()
 			ret.push_back(2 * m);
 		ret.push_back(5 * m);
 		ret.push_back(10 * m);
-		if(wm8)
+		if(wm8 || wm7)
 			ret.push_back(25 * m);
 		else
 			ret.push_back(20 * m);
@@ -3215,6 +3280,20 @@ vector<uint64_t> LeCroyOscilloscope::GetSampleRatesNonInterleaved()
 				ret.push_back(1250 * m);
 				ret.push_back(2500 * m);
 				ret.push_back(10 * g);
+				break;
+
+			case MODEL_SDA_7ZI:
+			case MODEL_SDA_7ZI_A:
+				ret.push_back(250 * m);
+				ret.push_back(500 * m);
+				ret.push_back(1 * g);
+				ret.push_back(2500 * m);
+				ret.push_back(5 * g);
+				ret.push_back(10 * g);
+
+				//2.5 GHz and higher SKUs have double the ADCs
+				if(m_maxBandwidth > 2000)
+					ret.push_back(20 * g);
 				break;
 
 			case MODEL_SDA_8ZI:
@@ -3290,7 +3369,8 @@ vector<uint64_t> LeCroyOscilloscope::GetSampleRatesInterleaved()
 		case MODEL_HDO_6KA:
 		case MODEL_LABMASTER_ZI_A:
 		case MODEL_MDA_800:
-		case MODEL_WAVEMASTER_8ZI_B:
+		case MODEL_WAVEMASTER_8ZI:
+		case MODEL_WAVEMASTER_8ZI_A:
 		case MODEL_WAVERUNNER_8K_HD:
 			break;
 
@@ -3339,8 +3419,22 @@ vector<uint64_t> LeCroyOscilloscope::GetSampleDepthsNonInterleaved()
 		ret.push_back(1 * m);
 		ret.push_back(2500 * k);
 		ret.push_back(2 * m);
-		ret.push_back(5 * m);
-		ret.push_back(10 * m);
+		switch(m_modelid)
+		{
+			case MODEL_SDA_7ZI:
+			case MODEL_SDA_7ZI_A:
+			case MODEL_SDA_8ZI:
+			case MODEL_SDA_8ZI_A:
+			case MODEL_SDA_8ZI_B:
+				ret.push_back(4 * m);
+				ret.push_back(8 * m);
+				break;
+
+			default:
+				ret.push_back(5 * m);
+				ret.push_back(10 * m);
+				break;
+		}
 
 		switch(m_modelid)
 		{
@@ -3390,12 +3484,28 @@ vector<uint64_t> LeCroyOscilloscope::GetSampleDepthsNonInterleaved()
 			case MODEL_WAVEMASTER_8ZI_B:
 				break;
 
+			//TODO: extended memory options
+			case MODEL_SDA_7ZI:
+			case MODEL_SDA_7ZI_A:
+				ret.push_back(20 * m);
+				if(m_memoryDepthOption >= 32)
+				{
+					ret.push_back(20 * m);
+					ret.push_back(25 * m);
+					ret.push_back(32 * m);
+				}
+				if(m_memoryDepthOption >= 64)
+				{
+					ret.push_back(50 * m);
+					ret.push_back(64 * m);
+				}
+				break;
+
 			//extended memory
 			case MODEL_SDA_8ZI:
 			case MODEL_SDA_8ZI_A:
 			case MODEL_SDA_8ZI_B:
 				ret.insert(ret.begin()+4, 4*k);
-
 				ret.push_back(20 * m);
 				ret.push_back(25 * m);
 				ret.push_back(40 * m);
@@ -3600,11 +3710,19 @@ void LeCroyOscilloscope::SetSampleRate(uint64_t rate)
 
 bool LeCroyOscilloscope::CanAverage(size_t i)
 {
+	//Disable averaging on WS3K series (https://github.com/ngscopeclient/scopehal/issues/1026)
+	if(m_modelid == MODEL_WAVESURFER_3K)
+		return false;
+
 	return (i < m_analogChannelCount);
 }
 
 size_t LeCroyOscilloscope::GetNumAverages(size_t i)
 {
+	//Disable averaging on WS3K series (https://github.com/ngscopeclient/scopehal/issues/1026)
+	if(m_modelid == MODEL_WAVESURFER_3K)
+		return 1;
+
 	//not meaningful for trigger or digital channels
 	if(i > m_analogChannelCount)
 		return 1;
@@ -3626,6 +3744,10 @@ size_t LeCroyOscilloscope::GetNumAverages(size_t i)
 
 void LeCroyOscilloscope::SetNumAverages(size_t i, size_t navg)
 {
+	//Disable averaging on WS3K series (https://github.com/ngscopeclient/scopehal/issues/1026)
+	if(m_modelid == MODEL_WAVESURFER_3K)
+		return;
+
 	//not meaningful for trigger or digital channels
 	if(i > m_analogChannelCount)
 		return;
@@ -4169,6 +4291,11 @@ void LeCroyOscilloscope::PullTrigger()
 	PullTriggerSource(m_trigger);
 
 	//TODO: holdoff
+
+	//Invert the trigger level if the source is inverted
+	auto trigSource = m_trigger->GetInput(0);
+	if(trigSource.IsInverted())
+		m_trigger->SetLevel(-m_trigger->GetLevel());
 }
 
 /**
@@ -4896,8 +5023,16 @@ void LeCroyOscilloscope::PushTrigger()
 {
 	if(!m_trigger->GetInput(0))
 	{
-		LogWarning("LeCroyOscilloscope::PushTrigger: no input specified\n");
-		return;
+		//if it's a CDR trigger, force it to channel 4 on all scopes
+		if(dynamic_cast<CDRTrigger*>(m_trigger))
+			m_trigger->SetInput(0, m_channels[3]);
+
+		//for anything else ignore unspecified sources
+		else
+		{
+			LogWarning("LeCroyOscilloscope::PushTrigger: no input specified\n");
+			return;
+		}
 	}
 
 	//Source is the same for every channel
@@ -4984,6 +5119,27 @@ void LeCroyOscilloscope::PushNRZTrigger(CDRNRZPatternTrigger* trig)
 {
 	//FIXME
 	LogWarning("LeCroyOscilloscope::PushNRZTrigger unimplemented\n");
+}
+
+/**
+	@brief Check if a candidate 8b10b character is a valid K code point
+ */
+bool LeCroyOscilloscope::IsValid8B10BKCharacter(int code5, int code3)
+{
+	switch(code5)
+	{
+		case 28:
+			return true;
+
+		case 23:
+		case 27:
+		case 29:
+		case 30:
+			return (code3 == 7);
+
+		default:
+			return false;
+	}
 }
 
 /**
@@ -5106,8 +5262,12 @@ void LeCroyOscilloscope::Push8b10bTrigger(CDR8B10BTrigger* trig)
 							m_transport->SendCommandQueued(string("VBS? 'app.Acquisition.Trigger.Serial.C8B10B.ORSymbol") +
 								si + "Type = \"KSymbol\"'");
 
-							m_transport->SendCommandQueued(string("VBS? 'app.Acquisition.Trigger.Serial.C8B10B.KSymbol") +
-								si + "ValueOR = \"K" + val + "\"'");
+							//Validate K symbol
+							if(IsValid8B10BKCharacter(code5, code3))
+							{
+								m_transport->SendCommandQueued(string("VBS? 'app.Acquisition.Trigger.Serial.C8B10B.KSymbol") +
+									si + "ValueOR = \"K" + val + "\"'");
+							}
 							break;
 
 						case T8B10BSymbol::DSYMBOL:
@@ -5162,8 +5322,13 @@ void LeCroyOscilloscope::Push8b10bTrigger(CDR8B10BTrigger* trig)
 						case T8B10BSymbol::KSYMBOL:
 							m_transport->SendCommandQueued(string("VBS? 'app.Acquisition.Trigger.Serial.C8B10B.StrSymbol") +
 								si + "Type = \"KSymbol\"'");
-							m_transport->SendCommandQueued(string("VBS? 'app.Acquisition.Trigger.Serial.C8B10B.StrKSymbol") +
-								si + "Value = \"K" + val + "\"'");
+
+							//Validate K symbol
+							if(IsValid8B10BKCharacter(code5, code3))
+							{
+								m_transport->SendCommandQueued(string("VBS? 'app.Acquisition.Trigger.Serial.C8B10B.StrKSymbol") +
+									si + "Value = \"K" + val + "\"'");
+							}
 							break;
 
 						case T8B10BSymbol::DSYMBOL:
@@ -5194,11 +5359,23 @@ void LeCroyOscilloscope::Push8b10bTrigger(CDR8B10BTrigger* trig)
 }
 
 /**
+	@brief Returns the trigger level after correcting for optional frontend inversion
+ */
+float LeCroyOscilloscope::GetTriggerLevelWithInversion(Trigger* trig)
+{
+	auto trigSource = trig->GetInput(0);
+	if(trigSource.IsInverted())
+		return -trig->GetLevel();
+	else
+		return trig->GetLevel();
+}
+
+/**
 	@brief Pushes settings for a dropout trigger to the instrument
  */
 void LeCroyOscilloscope::PushDropoutTrigger(DropoutTrigger* trig)
 {
-	PushFloat("app.Acquisition.Trigger.Dropout.Level", trig->GetLevel());
+	PushFloat("app.Acquisition.Trigger.Dropout.Level", GetTriggerLevelWithInversion(trig));
 	PushFloat("app.Acquisition.Trigger.Dropout.DropoutTime", trig->GetDropoutTime() * SECONDS_PER_FS);
 
 	if(trig->GetResetType() == DropoutTrigger::RESET_OPPOSITE)
@@ -5219,9 +5396,9 @@ void LeCroyOscilloscope::PushEdgeTrigger(EdgeTrigger* trig, const string& tree)
 {
 	//Level
 	if(m_modelid == MODEL_DDA_5K)
-		PushFloat("app.Acquisition.Trigger.TrigLevel", trig->GetLevel());
+		PushFloat("app.Acquisition.Trigger.TrigLevel", GetTriggerLevelWithInversion(trig));
 	else
-		PushFloat(tree + ".Level", trig->GetLevel());
+		PushFloat(tree + ".Level", GetTriggerLevelWithInversion(trig));
 
 	//Slope
 	string slope = "Positive";
@@ -5318,7 +5495,7 @@ void LeCroyOscilloscope::PushSlewRateTrigger(SlewRateTrigger* trig)
 void LeCroyOscilloscope::PushUartTrigger(UartTrigger* trig)
 {
 	//Special parameter for trigger level
-	PushFloat("app.Acquisition.Trigger.Serial.LevelAbsolute", trig->GetLevel());
+	PushFloat("app.Acquisition.Trigger.Serial.LevelAbsolute", GetTriggerLevelWithInversion(trig));
 
 	//AtPosition
 	//Bit9State

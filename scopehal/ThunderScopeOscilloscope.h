@@ -2,7 +2,7 @@
 *                                                                                                                      *
 * libscopehal                                                                                                          *
 *                                                                                                                      *
-* Copyright (c) 2012-2024 Andrew D. Zonenberg and contributors                                                         *
+* Copyright (c) 2012-2025 Andrew D. Zonenberg and contributors                                                         *
 * All rights reserved.                                                                                                 *
 *                                                                                                                      *
 * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
@@ -72,10 +72,12 @@ public:
 	virtual bool CanEnableChannel(size_t i) override;
 	virtual uint32_t GetInstrumentTypesForChannel(size_t i) const override;
 	virtual void SetChannelCoupling(size_t i, OscilloscopeChannel::CouplingType type) override;
+	virtual void EnableChannel(size_t i) override;
 
 	//Triggering
 	virtual Oscilloscope::TriggerMode PollTrigger() override;
 	virtual bool AcquireData() override;
+	virtual void PushEdgeTrigger(EdgeTrigger* trig) override;
 
 	// Captures
 	virtual void Start() override;
@@ -90,9 +92,20 @@ public:
 	virtual std::vector<uint64_t> GetSampleDepthsInterleaved() override;
 	virtual bool IsInterleaving() override;
 	virtual bool SetInterleaving(bool combine) override;
+	virtual bool CanInterleave() override;
+	virtual bool HasInterleavingControls() override;
+	void SetSampleDepth(uint64_t depth) override;
+	void SetSampleRate(uint64_t rate) override;
+
+	//ADC modes
+	virtual bool IsADCModeConfigurable() override;
+	virtual std::vector<std::string> GetADCModeNames(size_t channel) override;
+	virtual size_t GetADCMode(size_t channel) override;
+	virtual void SetADCMode(size_t channel, size_t mode) override;
 
 protected:
 	void ResetPerCaptureDiagnostics();
+	void RefreshSampleRate();
 
 	std::string GetChannelColor(size_t i);
 
@@ -133,13 +146,23 @@ protected:
 	std::unique_ptr<vk::raii::CommandBuffer> m_cmdBuf;
 
 	///@brief Compute pipeline for converting raw ADC codes to float32 samples
-	std::unique_ptr<ComputePipeline> m_conversionPipeline;
+	std::unique_ptr<ComputePipeline> m_conversion8BitPipeline;
+
+	///@brief Compute pipeline for converting raw ADC codes to float32 samples
+	std::unique_ptr<ComputePipeline> m_conversion16BitPipeline;
 
 	///@brief Buffer for storing channel clip state
 	AcceleratorBuffer<uint32_t> m_clippingBuffer;
 
 	///@brief Bandwidth limiters
 	std::vector<unsigned int> m_bandwidthLimits;
+
+	///@brief ADC modes
+	enum ADCMode
+	{
+		MODE_8BIT,
+		MODE_12BIT
+	} m_adcMode;
 
 public:
 

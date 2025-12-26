@@ -2,7 +2,7 @@
 *                                                                                                                      *
 * libscopeprotocols                                                                                                    *
 *                                                                                                                      *
-* Copyright (c) 2012-2022 Andrew D. Zonenberg and contributors                                                         *
+* Copyright (c) 2012-2025 Andrew D. Zonenberg and contributors                                                         *
 * All rights reserved.                                                                                                 *
 *                                                                                                                      *
 * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
@@ -35,13 +35,16 @@
 #ifndef ClockRecoveryFilter_h
 #define ClockRecoveryFilter_h
 
+#include "../scopehal/LevelCrossingDetector.h"
+
 class ClockRecoveryFilter : public Filter
 {
 public:
 	ClockRecoveryFilter(const std::string& color);
 	virtual ~ClockRecoveryFilter();
 
-	virtual void Refresh() override;
+	virtual void Refresh(vk::raii::CommandBuffer& cmdBuf, std::shared_ptr<QueueHandle> queue) override;
+	virtual DataLocation GetInputLocation() override;
 
 	static std::string GetProtocolName();
 
@@ -50,8 +53,37 @@ public:
 	PROTOCOL_DECODER_INITPROC(ClockRecoveryFilter)
 
 protected:
+	void FillSquarewaveGeneric(SparseDigitalWaveform& cap);
+
+	void InnerLoopWithGating(
+		SparseDigitalWaveform& cap,
+		AcceleratorBuffer<int64_t>& edges,
+		size_t nedges,
+		int64_t tend,
+		int64_t initialPeriod,
+		int64_t halfPeriod,
+		int64_t fnyquist,
+		WaveformBase* gate,
+		SparseDigitalWaveform* sgate,
+		UniformDigitalWaveform* ugate);
+
+	void InnerLoopWithNoGating(
+		SparseDigitalWaveform& cap,
+		AcceleratorBuffer<int64_t>& edges,
+		size_t nedges,
+		int64_t tend,
+		int64_t initialPeriod,
+		int64_t halfPeriod,
+		int64_t fnyquist);
+
+#ifdef __x86_64__
+	void FillSquarewaveAVX2(SparseDigitalWaveform& cap);
+#endif
+
 	std::string m_baudname;
 	std::string m_threshname;
+
+	LevelCrossingDetector m_detector;
 };
 
 #endif

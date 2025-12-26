@@ -2,7 +2,7 @@
 *                                                                                                                      *
 * libscopehal                                                                                                          *
 *                                                                                                                      *
-* Copyright (c) 2012-2024 Andrew D. Zonenberg and contributors                                                         *
+* Copyright (c) 2012-2025 Andrew D. Zonenberg and contributors                                                         *
 * All rights reserved.                                                                                                 *
 *                                                                                                                      *
 * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
@@ -334,6 +334,44 @@ protected:
 	SparseDigitalWaveform* SetupEmptySparseDigitalOutputWaveform(WaveformBase* din, size_t stream);
 	SparseAnalogWaveform* SetupSparseOutputWaveform(SparseWaveformBase* din, size_t stream, size_t skipstart, size_t skipend);
 	SparseDigitalWaveform* SetupSparseDigitalOutputWaveform(SparseWaveformBase* din, size_t stream, size_t skipstart, size_t skipend);
+
+	/**
+		@brief Sets up an empty output waveform and copies basic metadata from the input.
+
+		A new output waveform is created if necessary, but when possible the existing one is reused.
+
+		@param din			Input waveform
+		@param stream		Stream index
+		@param clear		True to clear an existing waveform, false to leave it as-is
+
+		@return	The ready-to-use output waveform
+	 */
+	template<class T>
+	T* SetupEmptyWaveform(WaveformBase* din, size_t stream, bool clear = true)
+	{
+		//Create the waveform, but only if necessary
+		auto cap = dynamic_cast<T*>(GetData(stream));
+		if(cap == NULL)
+		{
+			cap = new T;
+			SetData(cap, stream);
+		}
+
+		//Copy configuration
+		cap->m_startTimestamp 		= din->m_startTimestamp;
+		cap->m_startFemtoseconds	= din->m_startFemtoseconds;
+		cap->m_triggerPhase			= din->m_triggerPhase;
+		cap->m_timescale			= din->m_timescale;
+
+		//Bump rev number
+		cap->m_revision ++;
+
+		//Clear output
+		if(clear)
+			cap->clear();
+
+		return cap;
+	}
 
 public:
 	//Helpers for sub-sample interpolation
@@ -706,31 +744,67 @@ public:
 
 		samples.clear();
 		samples.SetGpuAccessHint(AcceleratorBuffer<S>::HINT_NEVER);	//assume we're being used as part of a CPU-side filter
-		samples.PrepareForCpuAccess();
 
 		//TODO: split up into blocks and multithread?
 		//TODO: AVX vcompress?
-
 		size_t len = clock->size();
 		size_t dlen = data->size();
 
-		size_t ndata = 0;
-		for(size_t i=1; i<len; i++)
+		//If the clock is sparse, assume it probably has edges on every sample and allocate that much buffer to start
+		//(we might overallocate here but it'll be a lot faster)
+		if(dynamic_cast<SparseDigitalWaveform*>(clock) != nullptr)
 		{
-			//Throw away clock samples until we find an edge
-			if(clock->m_samples[i] == clock->m_samples[i-1])
-				continue;
+			//Allocate exactly enough space
+			samples.Resize(clock->size());
+			samples.PrepareForCpuAccess();
 
-			//Throw away data samples until the data is synced with us
-			int64_t clkstart = GetOffsetScaled(clock, i);
-			while( (ndata+1 < dlen) && (GetOffsetScaled(data, ndata+1) < clkstart) )
-				ndata ++;
-			if(ndata >= dlen)
-				break;
+			size_t ndata = 0;
+			size_t nout = 0;
+			for(size_t i=1; i<len; i++)
+			{
+				//Throw away clock samples until we find an edge
+				if(clock->m_samples[i] == clock->m_samples[i-1])
+					continue;
 
-			//Add the new sample
-			samples.m_offsets.push_back(clkstart);
-			samples.m_samples.push_back(data->m_samples[ndata]);
+				//Throw away data samples until the data is synced with us
+				int64_t clkstart = GetOffsetScaled(clock, i);
+				while( (ndata+1 < dlen) && (GetOffsetScaled(data, ndata+1) < clkstart) )
+					ndata ++;
+				if(ndata >= dlen)
+					break;
+
+				//Add the new sample
+				samples.m_offsets[nout] = clkstart;
+				samples.m_samples[nout] = data->m_samples[ndata];
+				nout ++;
+			}
+			samples.Resize(nout);
+			samples.MarkModifiedFromCpu();
+		}
+		else
+		{
+			samples.Reserve(1 * 1024 * 1024);	//preallocate 1 MB sample buffer to avoid lots of reallocation when small
+												//if it's smaller than this, we won't waste a lot of memory
+			samples.PrepareForCpuAccess();
+
+			size_t ndata = 0;
+			for(size_t i=1; i<len; i++)
+			{
+				//Throw away clock samples until we find an edge
+				if(clock->m_samples[i] == clock->m_samples[i-1])
+					continue;
+
+				//Throw away data samples until the data is synced with us
+				int64_t clkstart = GetOffsetScaled(clock, i);
+				while( (ndata+1 < dlen) && (GetOffsetScaled(data, ndata+1) < clkstart) )
+					ndata ++;
+				if(ndata >= dlen)
+					break;
+
+				//Add the new sample
+				samples.m_offsets.push_back(clkstart);
+				samples.m_samples.push_back(data->m_samples[ndata]);
+			}
 		}
 
 		//Compute sample durations
@@ -803,6 +877,8 @@ public:
 
 		samples.clear();
 		samples.SetGpuAccessHint(AcceleratorBuffer<S>::HINT_NEVER);	//assume we're being used as part of a CPU-side filter
+		samples.Reserve(1 * 1024 * 1024);	//preallocate 1 MB sample buffer to avoid lots of reallocation when small
+											//if it's smaller than this, we won't waste a lot of memory
 
 		//TODO: split up into blocks and multithread?
 		//TODO: AVX vcompress?
@@ -899,6 +975,8 @@ public:
 
 		samples.clear();
 		samples.SetGpuAccessHint(AcceleratorBuffer<S>::HINT_NEVER);	//assume we're being used as part of a CPU-side filter
+		samples.Reserve(1 * 1024 * 1024);	//preallocate 1 MB sample buffer to avoid lots of reallocation when small
+											//if it's smaller than this, we won't waste a lot of memory
 
 		//TODO: split up into blocks and multithread?
 		//TODO: AVX vcompress?
@@ -957,6 +1035,8 @@ public:
 
 		samples.clear();
 		samples.SetGpuAccessHint(AcceleratorBuffer<float>::HINT_NEVER);	//assume we're being used as part of a CPU-side filter
+		samples.Reserve(1 * 1024 * 1024);	//preallocate 1 MB sample buffer to avoid lots of reallocation when small
+											//if it's smaller than this, we won't waste a lot of memory
 
 		//TODO: split up into blocks and multithread?
 		//TODO: AVX vcompress
@@ -1129,6 +1209,22 @@ public:
 	}
 
 	static void ClearAnalysisCache();
+
+	enum FIRFilterType
+	{
+		FILTER_TYPE_LOWPASS,
+		FILTER_TYPE_HIGHPASS,
+		FILTER_TYPE_BANDPASS,
+		FILTER_TYPE_NOTCH
+	};
+
+	static void CalculateFIRCoefficients(
+		float fa,
+		float fb,
+		float stopbandAtten,
+		FIRFilterType type,
+		AcceleratorBuffer<float>& coefficients);
+	static float Bessel(float x);
 
 protected:
 	//Helpers for sparse waveforms

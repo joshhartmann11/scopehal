@@ -2,7 +2,7 @@
 *                                                                                                                      *
 * libscopeprotocols                                                                                                    *
 *                                                                                                                      *
-* Copyright (c) 2012-2024 Andrew D. Zonenberg and contributors                                                         *
+* Copyright (c) 2012-2025 Andrew D. Zonenberg and contributors                                                         *
 * All rights reserved.                                                                                                 *
 *                                                                                                                      *
 * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
@@ -158,7 +158,7 @@ void FFTFilter::Refresh(vk::raii::CommandBuffer& cmdBuf, shared_ptr<QueueHandle>
 	//Make sure we've got valid inputs
 	if(!VerifyAllInputsOKAndUniformAnalog())
 	{
-		SetData(NULL, 0);
+		SetData(nullptr, 0);
 		return;
 	}
 	auto din = dynamic_cast<UniformAnalogWaveform*>(GetInputWaveform(0));
@@ -203,6 +203,13 @@ void FFTFilter::DoRefresh(
 	cap->m_triggerPhase = 1*bin_hz;
 	cap->m_timescale = bin_hz;
 	cap->Resize(nouts);
+
+	//If we have too big a FFT at low sample rate we can run below 1 Hz resolution and bork
+	if(cap->m_timescale == 0)
+	{
+		SetData(nullptr, 0);
+		return;
+	}
 
 	//Output scale is based on the number of points we FFT that contain actual sample data.
 	//(If we're zero padding, the zeroes don't contribute any power)
@@ -312,5 +319,5 @@ void FFTFilter::DoRefresh(
 	cap->MarkModifiedFromGpu();
 
 	//Peak search (for now this runs on the CPU)
-	FindPeaks(cap);
+	FindPeaks(cap, cmdBuf, queue);
 }

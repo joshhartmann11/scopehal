@@ -2,7 +2,7 @@
 *                                                                                                                      *
 * libscopehal                                                                                                          *
 *                                                                                                                      *
-* Copyright (c) 2012-2024 Andrew D. Zonenberg and contributors                                                         *
+* Copyright (c) 2012-2025 Andrew D. Zonenberg and contributors                                                         *
 * All rights reserved.                                                                                                 *
 *                                                                                                                      *
 * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
@@ -35,6 +35,7 @@
 #include "scopehal.h"
 #include "scopehal-version.h"
 #include <libgen.h>
+#include <filesystem>
 
 #include "AgilentOscilloscope.h"
 #include "AlientekPowerSupply.h"
@@ -57,6 +58,7 @@
 #include "TektronixOscilloscope.h"
 #include "TektronixHSIOscilloscope.h"
 #include "ThunderScopeOscilloscope.h"
+#include "HaasoscopePro.h"
 #include "TinySA.h"
 
 #include "AntikernelLabsTriggerCrossbar.h"
@@ -77,6 +79,7 @@
 #include "RohdeSchwarzHMC804xPowerSupply.h"
 #include "SiglentPowerSupply.h"
 #include "RidenPowerSupply.h"
+#include "SinilinkPowerSupply.h"
 #include "KuaiquPowerSupply.h"
 
 #include "SiglentLoad.h"
@@ -130,11 +133,12 @@ bool g_hasFMA = false;
 #include <mach-o/dyld.h>
 #endif
 
-///@brief True if filters can use GPU acceleration
-bool g_gpuFilterEnabled = false;
+/**
+	@brief True if filters can use GPU acceleration
 
-///@brief True if scope drivers can use GPU acceleration
-bool g_gpuScopeDriverEnabled = false;
+	Will be deprecated soon since Vulkan is now a mandatory core part of the application
+ */
+bool g_gpuFilterEnabled = false;
 
 vector<string> g_searchPaths;
 
@@ -142,6 +146,13 @@ void VulkanCleanup();
 
 ///@brief List of handlers for low memory registered by various subsystems
 set<MemoryPressureHandler> g_memoryPressureHandlers;
+
+/**
+	@brief Mutex for controlling access to background Vulkan activity
+
+	Arbitrarily many threads can own this mutex at once, but it must be held when calling vkDeviceWaitIdle.
+ */
+shared_mutex g_vulkanActivityMutex;
 
 /**
 	@brief Static initialization for SCPI transports
@@ -167,9 +178,6 @@ void TransportStaticInit()
 
 #ifdef HAS_LXI
 	AddTransportClass(SCPILxiTransport);
-#endif
-#ifdef HAS_LINUXGPIB
-	AddTransportClass(SCPILinuxGPIBTransport);
 #endif
 }
 
@@ -226,6 +234,7 @@ void DriverStaticInit()
 {
 	InitializeSearchPaths();
 	DetectCPUFeatures();
+	Unit::InitializeLocales();
 
 	AddBERTDriverClass(AntikernelLabsTriggerCrossbar);
 	AddBERTDriverClass(MultiLaneBERT);
@@ -236,6 +245,7 @@ void DriverStaticInit()
 	AddDriverClass(DemoOscilloscope);
 	AddDriverClass(DigilentOscilloscope);
 	AddDriverClass(DSLabsOscilloscope);
+	AddDriverClass(HaasoscopePro);
 	AddDriverClass(KeysightDCA);
 	AddDriverClass(PicoLogicAnalyser);
 	AddDriverClass(RigolOscilloscope);
@@ -271,6 +281,7 @@ void DriverStaticInit()
 	AddPowerSupplyDriverClass(HP662xAPowerSupply);
 	AddPowerSupplyDriverClass(AlientekPowerSupply);
 	AddPowerSupplyDriverClass(RidenPowerSupply);
+	AddPowerSupplyDriverClass(SinilinkPowerSupply);
 	AddPowerSupplyDriverClass(KuaiquPowerSupply);
 
 	AddRFSignalGeneratorDriverClass(SiglentVectorSignalGenerator);
@@ -357,6 +368,8 @@ void InitializePlugins()
 	for(auto dir : search_dirs)
 	{
 		DIR* hdir = opendir(dir.c_str());
+		LogDebug("Searching for plugins in %s\n", dir.c_str());
+		LogIndenter li;
 		if(!hdir)
 			continue;
 
@@ -375,14 +388,19 @@ void InitializePlugins()
 			//(for now, never unload the plugins)
 			string fname = dir + "/" + pent->d_name;
 			void* hlib = dlopen(fname.c_str(), RTLD_NOW);
-			if(hlib == NULL)
+			if(hlib == nullptr)
 				continue;
+			LogDebug("Checking %s\n", fname.c_str());
+			LogIndenter li2;
 
 			//If loaded, look for PluginInit()
 			typedef void (*PluginInit)();
 			PluginInit init = (PluginInit)dlsym(hlib, "PluginInit");
 			if(!init)
+			{
+				LogDebug("PluginInit not found, skipping\n");
 				continue;
+			}
 
 			//If found, it's a valid plugin
 			LogDebug("Loading plugin %s\n", fname.c_str());
@@ -700,7 +718,7 @@ string GetDirOfCurrentExecutable()
 
 void InitializeSearchPaths()
 {
-	string binRootDir;
+	std::filesystem::path binRootDir;
 	//Search in the directory of the glscopeclient binary first
 #ifdef _WIN32
 	TCHAR binPath[MAX_PATH];
@@ -711,11 +729,7 @@ void InitializeSearchPaths()
 	else
 	{
 		g_searchPaths.push_back(binPath);
-
-		// On mingw, binPath would typically be /mingw64/bin now
-		//and our data files in /mingw64/share. Strip back one more layer
-		// of hierarchy so we can start appending.
-		binRootDir = dirname(binPath);
+		binRootDir = binPath;
 	}
 #else
 	binRootDir = GetDirOfCurrentExecutable();
@@ -726,10 +740,11 @@ void InitializeSearchPaths()
 #endif
 
 	// Add the share directories associated with the binary location
-	if(binRootDir.size() > 0)
+	if(!binRootDir.empty())
 	{
-		g_searchPaths.push_back(binRootDir + "/share/ngscopeclient");
-		g_searchPaths.push_back(binRootDir + "/share/scopehal");
+		std::filesystem::path rootDir = binRootDir.parent_path();
+		g_searchPaths.push_back((rootDir / "share/ngscopeclient").string());
+		g_searchPaths.push_back((rootDir / "share/scopehal").string());
 	}
 
 	//Local directories preferred over system ones

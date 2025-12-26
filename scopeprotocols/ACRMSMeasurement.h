@@ -2,7 +2,7 @@
 *                                                                                                                      *
 * libscopeprotocols                                                                                                    *
 *                                                                                                                      *
-* Copyright (c) 2012-2023 Andrew D. Zonenberg and contributors                                                         *
+* Copyright (c) 2012-2025 Andrew D. Zonenberg and contributors                                                         *
 * All rights reserved.                                                                                                 *
 *                                                                                                                      *
 * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
@@ -35,17 +35,53 @@
 #ifndef ACRMSMeasurement_h
 #define ACRMSMeasurement_h
 
+#include "../scopehal/Averager.h"
+#include "../scopehal/LevelCrossingDetector.h"
+
+struct __attribute__((packed)) ACRMSPushConstants
+{
+	uint32_t numSamples;
+	uint32_t numThreads;
+	uint32_t samplesPerThread;
+	float dcBias;
+};
+
+struct __attribute__((packed)) ACRMSTrendPushConstants
+{
+	int64_t timescale;
+	int64_t numSamples;
+	uint32_t numEdgePairs;
+	float dcBias;
+};
+
 class ACRMSMeasurement : public Filter
 {
 public:
 	ACRMSMeasurement(const std::string& color);
 
-	virtual void Refresh() override;
+	virtual void Refresh(vk::raii::CommandBuffer& cmdBuf, std::shared_ptr<QueueHandle> queue) override;
 
 	static std::string GetProtocolName();
 
 	virtual bool ValidateChannel(size_t i, StreamDescriptor stream) override;
+	virtual DataLocation GetInputLocation() override;
 
+protected:
+	void DoRefreshSparse(SparseAnalogWaveform* wfm);
+	void DoRefreshUniform(
+		UniformAnalogWaveform* wfm,
+		vk::raii::CommandBuffer& cmdBuf,
+		std::shared_ptr<QueueHandle> queue);
+
+	Averager m_averager;
+	LevelCrossingDetector m_detector;
+
+	std::unique_ptr<ComputePipeline> m_rmsComputePipeline;
+	AcceleratorBuffer<float> m_temporaryResults;
+
+	std::unique_ptr<ComputePipeline> m_trendComputePipeline;
+
+public:
 	PROTOCOL_DECODER_INITPROC(ACRMSMeasurement)
 };
 

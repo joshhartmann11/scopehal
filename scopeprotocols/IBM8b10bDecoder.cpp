@@ -2,7 +2,7 @@
 *                                                                                                                      *
 * libscopeprotocols                                                                                                    *
 *                                                                                                                      *
-* Copyright (c) 2012-2023 Andrew D. Zonenberg and contributors                                                         *
+* Copyright (c) 2012-2025 Andrew D. Zonenberg and contributors                                                         *
 * All rights reserved.                                                                                                 *
 *                                                                                                                      *
 * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
@@ -95,7 +95,7 @@ void IBM8b10bDecoder::Refresh()
 
 	if(!VerifyAllInputsOK())
 	{
-		SetData(NULL, 0);
+		SetData(nullptr, 0);
 		return;
 	}
 
@@ -115,17 +115,28 @@ void IBM8b10bDecoder::Refresh()
 	//Record the value of the data stream at each clock edge
 	//TODO: allow single rate clocks too?
 	SparseDigitalWaveform data;
-	SparseDigitalWaveform wsquelch;
 	SampleOnAnyEdgesBase(din, clkin, data);
 	data.PrepareForCpuAccess();
+
+	//Preallocate output buffer
+	cap->Reserve(data.m_samples.size() / 10);
 
 	//Decode the actual data
 	int last_disp = -1;
 	bool first = true;
-	size_t dlen = data.m_samples.size() - 11;
+	size_t nsamples = data.m_samples.size();
+	if(nsamples < 11)
+	{
+		SetData(nullptr, 0);
+		return;
+	}
+	size_t dlen = nsamples - 11;
 	int64_t lastSymbolLength = 0;
 	int64_t lastSymbolEnd = 0;
 	int64_t lastSymbolStart = 0;
+	size_t numBadSymbols		= 0;
+	size_t timeSinceBadSymbol	= 0;
+	size_t resyncCooldown = 0;
 	for(size_t i=0; i<dlen;i+=10)
 	{
 		//Re-synchronize at start of waveform or if squelch is reopening
@@ -319,6 +330,36 @@ void IBM8b10bDecoder::Refresh()
 			cap->m_offsets.push_back(symbolStart);
 			cap->m_durations.push_back(lastSymbolLength);
 			cap->m_samples.push_back(IBM8b10bSymbol(ctl5, err5, err3, disperr, (code3 << 5) | code5, last_disp));
+		}
+
+		//If we're in the cool-down window after a resync, don't try to resync immediately
+		if(resyncCooldown)
+			resyncCooldown --;
+
+		//Monitor errors
+		else
+		{
+			if(err3 || err5 || disperr)
+			{
+				numBadSymbols ++;
+				timeSinceBadSymbol = 0;
+
+				//After 50 bad symbols in a burst, declare sync to be lost and try again
+				//If this resync is unsuccessful, don't try to resync for a while
+				if(numBadSymbols > 50)
+				{
+					numBadSymbols = 0;
+					resyncCooldown = 5000;
+					first = true;
+				}
+			}
+			else
+			{
+				//Forget about errors after a while
+				timeSinceBadSymbol ++;
+				if(timeSinceBadSymbol > 512)
+					numBadSymbols = 0;
+			}
 		}
 
 		lastSymbolLength = symbolLength;

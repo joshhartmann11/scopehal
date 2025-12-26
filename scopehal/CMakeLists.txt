@@ -23,14 +23,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 		message("-- LXI library not found, LXI (VXI-11/TCP and RAW/TCP ) instrument support will not be available.")
 		unset(LXI_LINK_LIBRARIES CACHE)
 	endif()
-
-
-	pkg_check_modules(LINUXGPIB libgpib QUIET IMPORTED_TARGET)
-	if(LINUXGPIB_FOUND)
-		message("-- Found Linux GPIB: ${LINUXGPIB_LINK_LIBRARIES}")
-	else()
-		message("-- Linux GPIB not found, GPIB instrument support will not be available.")
-	endif()
 endif()
 
 # This is needed for the precompiled header
@@ -38,12 +30,16 @@ get_target_property(Vulkan_INCLUDE_DIR Vulkan::Headers INTERFACE_INCLUDE_DIRECTO
 
 
 #Set up versioning (with a dummy string for now if Git isn't present)
-if(Git_FOUND)
-	execute_process(
-		COMMAND ${GIT_EXECUTABLE} describe --always --tags
-		WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-		OUTPUT_VARIABLE SCOPEHAL_VERSION
-		OUTPUT_STRIP_TRAILING_WHITESPACE)
+if (Git_FOUND OR SCOPEHAL_PACKAGE_VERSION)
+    if(NOT SCOPEHAL_PACKAGE_VERSION)
+        execute_process(
+                    COMMAND ${GIT_EXECUTABLE} describe --always --tags
+                    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                    OUTPUT_VARIABLE SCOPEHAL_VERSION
+                    OUTPUT_STRIP_TRAILING_WHITESPACE)
+    else ()
+        set(SCOPEHAL_VERSION "${SCOPEHAL_PACKAGE_VERSION}")
+    endif ()
 else()
 	set(SCOPEHAL_VERSION "unknown")
 endif()
@@ -74,11 +70,13 @@ set(SCOPEHAL_SOURCES
 	EyeMask.cpp
 	EyeWaveform.cpp
 
+	Averager.cpp
+	LevelCrossingDetector.cpp
+
 	SCPITransport.cpp
 	SCPISocketTransport.cpp
 	SCPITwinLanTransport.cpp
 	VICPSocketTransport.cpp
-	SCPILinuxGPIBTransport.cpp
 	SCPILxiTransport.cpp
 	SCPINullTransport.cpp
 	SCPISocketCANTransport.cpp
@@ -168,6 +166,7 @@ set(SCOPEHAL_SOURCES
 	DigilentOscilloscope.cpp
 	DSLabsOscilloscope.cpp
 	GWInstekGPDX303SPowerSupply.cpp
+	HaasoscopePro.cpp
 	KeysightDCA.cpp
 	LeCroyOscilloscope.cpp
 	LeCroyFWPOscilloscope.cpp
@@ -197,6 +196,7 @@ set(SCOPEHAL_SOURCES
 	RohdeSchwarzHMC8012Multimeter.cpp
 	RohdeSchwarzHMC804xPowerSupply.cpp
 	RidenPowerSupply.cpp
+	SinilinkPowerSupply.cpp
 	KuaiquPowerSupply.cpp
 
 	StandardColors.cpp
@@ -246,10 +246,15 @@ target_link_libraries(scopehal
 	Vulkan::Loader
 	Vulkan::Headers
 	glslang::glslang
-	glslang::SPIRV
 	glfw
 	${WIN_LIBS}
 	)
+
+if(TARGET glslang::SPIRV)
+	target_link_libraries(scopehal
+		glslang::SPIRV
+	)
+endif()
 
 if(LXI_FOUND)
 	target_link_libraries(scopehal
@@ -257,13 +262,6 @@ if(LXI_FOUND)
 		PkgConfig::TIRPC
 	)
 	target_compile_definitions(scopehal PUBLIC HAS_LXI)
-endif()
-
-if(LINUXGPIB_FOUND)
-	target_link_libraries(scopehal
-		PkgConfig::LINUXGPIB
-	)
-	target_compile_definitions(scopehal PUBLIC HAS_LINUXGPIB)
 endif()
 
 target_include_directories(scopehal

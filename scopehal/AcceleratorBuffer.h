@@ -483,7 +483,7 @@ public:
 	 */
 	void reserve(size_t size)
 	{
-		if(size >= m_capacity)
+		if(size > m_capacity)
 			Reallocate(size);
 	}
 
@@ -756,6 +756,16 @@ public:
 		m_cpuPtr[cursize] = value;
 
 		MarkModifiedFromCpu();
+	}
+
+	/**
+		@brief Adds a new element to the end of the container, allocating space if needed but without calling MarkModifiedFromCpu
+	 */
+	void push_back_nomarkmod(const T& value)
+	{
+		size_t cursize = m_size;
+		resize(m_size + 1);
+		m_cpuPtr[cursize] = value;
 	}
 
 	/**

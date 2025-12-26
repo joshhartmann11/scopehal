@@ -2,7 +2,7 @@
 *                                                                                                                      *
 * libscopehal                                                                                                          *
 *                                                                                                                      *
-* Copyright (c) 2012-2024 Andrew D. Zonenberg and contributors                                                         *
+* Copyright (c) 2012-2025 Andrew D. Zonenberg and contributors                                                         *
 * All rights reserved.                                                                                                 *
 *                                                                                                                      *
 * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
@@ -40,6 +40,40 @@
 #include "VulkanFFTPlan.h"
 #include <random>
 
+struct __attribute__((packed)) DegradeSerialDataPushConstants
+{
+	uint32_t numSamples;
+	uint32_t samplesPerThread;
+	uint32_t rngSeed;
+	uint32_t inputOffset;
+	float scale;
+	float sigma;
+};
+
+struct __attribute__((packed)) NoisySinePushConstants
+{
+	uint32_t numSamples;
+	uint32_t samplesPerThread;
+	uint32_t rngSeed;
+	float startPhase;
+	float scale;
+	float sigma;
+	float radiansPerSample;
+};
+
+struct __attribute__((packed)) NoisySineSumPushConstants
+{
+	uint32_t numSamples;
+	uint32_t samplesPerThread;
+	uint32_t rngSeed;
+	float startPhase1;
+	float startPhase2;
+	float scale;
+	float sigma;
+	float radiansPerSample1;
+	float radiansPerSample2;
+};
+
 /**
 	@brief Helper class for generating test waveforms
 
@@ -56,16 +90,21 @@ public:
 	TestWaveformSource(const TestWaveformSource&) =delete;
 	TestWaveformSource& operator=(const TestWaveformSource&) =delete;
 
-	WaveformBase* GenerateNoisySinewave(
+	void GenerateNoisySinewave(
+		vk::raii::CommandBuffer& cmdBuf,
+		std::shared_ptr<QueueHandle> queue,
+		UniformAnalogWaveform* wfm,
 		float amplitude,
 		float startphase,
 		float period,
 		int64_t sampleperiod,
 		size_t depth,
-		float noise_stdev = 0.01,
-		std::function<void(float)> downloadCallback = nullptr);
+		float noise_stdev = 0.01);
 
-	WaveformBase* GenerateNoisySinewaveSum(
+	void GenerateNoisySinewaveSum(
+		vk::raii::CommandBuffer& cmdBuf,
+		std::shared_ptr<QueueHandle> queue,
+		UniformAnalogWaveform* wfm,
 		float amplitude,
 		float startphase1,
 		float startphase2,
@@ -73,30 +112,29 @@ public:
 		float period2,
 		int64_t sampleperiod,
 		size_t depth,
-		float noise_stdev = 0.01,
-		std::function<void(float)> downloadCallback = nullptr);
+		float noise_stdev = 0.01);
 
-	WaveformBase* GeneratePRBS31(
+	void GeneratePRBS31(
 		vk::raii::CommandBuffer& cmdBuf,
 		std::shared_ptr<QueueHandle> queue,
+		UniformAnalogWaveform* wfm,
 		float amplitude,
 		float period,
 		int64_t sampleperiod,
 		size_t depth,
 		bool lpf = true,
-		float noise_stdev = 0.01,
-		std::function<void(float)> downloadCallback = nullptr);
+		float noise_stdev = 0.01);
 
-	WaveformBase* Generate8b10b(
+	void Generate8b10b(
 		vk::raii::CommandBuffer& cmdBuf,
 		std::shared_ptr<QueueHandle> queue,
+		UniformAnalogWaveform* wfm,
 		float amplitude,
 		float period,
 		int64_t sampleperiod,
 		size_t depth,
 		bool lpf = true,
-		float noise_stdev = 0.01,
-		std::function<void(float)> downloadCallback = nullptr);
+		float noise_stdev = 0.01);
 
 	WaveformBase* GenerateStep(
 		float vlo,
@@ -147,6 +185,15 @@ protected:
 
 	///@brief Compute pipeline for channel emulation
 	ComputePipeline m_channelEmulationComputePipeline;
+
+	///@brief Compute pipeline for noisy sinewave generation
+	ComputePipeline m_noisySineComputePipeline;
+
+	///@brief Compute pipeline for noisy sinewave sum generation
+	ComputePipeline m_noisySineSumComputePipeline;
+
+	///@brief Compute pipeline for DegradeSerialData
+	ComputePipeline m_degradeComputePipeline;
 
 	///@brief S-parameters of the channel
 	SParameters m_sparams;

@@ -2,7 +2,7 @@
 *                                                                                                                      *
 * libscopehal                                                                                                          *
 *                                                                                                                      *
-* Copyright (c) 2012-2024 Andrew D. Zonenberg and contributors                                                         *
+* Copyright (c) 2012-2025 Andrew D. Zonenberg and contributors                                                         *
 * All rights reserved.                                                                                                 *
 *                                                                                                                      *
 * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
@@ -55,6 +55,7 @@
 #include <cinttypes>
 #include <set>
 #include <float.h>
+#include <shared_mutex>
 
 #include <sigc++/sigc++.h>
 
@@ -81,9 +82,15 @@ extern bool g_hasAvx512DQ;
 extern bool g_hasAvx2;
 #endif
 
+//Helper for absolute value of an int64_t
+#ifdef _WIN32
+#define i64abs(x) llabs(x)
+#else
+#define i64abs(x) labs(x)
+#endif
+
 //Enable flags for various features
 extern bool g_gpuFilterEnabled;
-extern bool g_gpuScopeDriverEnabled;
 extern bool g_hasShaderFloat64;
 extern bool g_hasShaderInt64;
 extern bool g_hasShaderInt16;
@@ -95,6 +102,14 @@ extern bool g_hasPushDescriptor;
 
 extern size_t g_maxComputeGroupCount[3];
 
+struct FIRFilterArgs
+{
+	uint32_t end;
+	uint32_t filterlen;
+};
+
+uint32_t GetComputeBlockCount(size_t numGlobal, size_t blockSize);
+
 #include "Unit.h"
 #include "Bijection.h"
 #include "IDTable.h"
@@ -105,7 +120,6 @@ extern size_t g_maxComputeGroupCount[3];
 #include "SCPITransport.h"
 #include "SCPISocketTransport.h"
 #include "SCPITwinLanTransport.h"
-#include "SCPILinuxGPIBTransport.h"
 #include "SCPILxiTransport.h"
 #include "SCPINullTransport.h"
 #include "SCPIUARTTransport.h"
@@ -256,8 +270,7 @@ extern bool g_vulkanDeviceIsMoltenVK;
 extern uint32_t g_vkPinnedMemoryHeap;
 extern uint32_t g_vkLocalMemoryHeap;
 extern bool g_vulkanDeviceHasUnifiedMemory;
-
-uint32_t GetComputeBlockCount(size_t numGlobal, size_t blockSize);
+extern std::shared_mutex g_vulkanActivityMutex;;
 
 //Validation helper for templates
 //Throws compile-time error if specialized for false since there's no implementation

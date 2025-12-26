@@ -2,7 +2,7 @@
 *                                                                                                                      *
 * libscopeprotocols                                                                                                    *
 *                                                                                                                      *
-* Copyright (c) 2012-2023 Andrew D. Zonenberg and contributors                                                         *
+* Copyright (c) 2012-2025 Andrew D. Zonenberg and contributors                                                         *
 * All rights reserved.                                                                                                 *
 *                                                                                                                      *
 * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
@@ -29,6 +29,10 @@
 
 #include "../scopehal/scopehal.h"
 #include "ClockRecoveryFilter.h"
+
+#ifdef __x86_64__
+#include <immintrin.h>
+#endif
 
 using namespace std;
 
@@ -100,18 +104,18 @@ string ClockRecoveryFilter::GetProtocolName()
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Actual decoder logic
 
-void ClockRecoveryFilter::Refresh()
+void ClockRecoveryFilter::Refresh(
+	vk::raii::CommandBuffer& cmdBuf,
+	shared_ptr<QueueHandle> queue)
 {
 	//Require a data signal, but not necessarily a gate
 	if(!VerifyInputOK(0))
 	{
-		SetData(NULL, 0);
+		SetData(nullptr, 0);
 		return;
 	}
 
 	auto din = GetInputWaveform(0);
-	din->PrepareForCpuAccess();
-
 	auto uadin = dynamic_cast<UniformAnalogWaveform*>(din);
 	auto sadin = dynamic_cast<SparseAnalogWaveform*>(din);
 	auto uddin = dynamic_cast<UniformDigitalWaveform*>(din);
@@ -123,31 +127,48 @@ void ClockRecoveryFilter::Refresh()
 		gate->PrepareForCpuAccess();
 
 	//Timestamps of the edges
-	vector<int64_t> edges;
+	size_t nedges = 0;
+	AcceleratorBuffer<int64_t> vedges;
+	float threshold = m_parameters[m_threshname].GetFloatVal();
 	if(uadin)
-		FindZeroCrossings(uadin, m_parameters[m_threshname].GetFloatVal(), edges);
-	else if(sadin)
-		FindZeroCrossings(sadin, m_parameters[m_threshname].GetFloatVal(), edges);
-	else if(uddin)
-		FindZeroCrossings(uddin, edges);
-	else if(sddin)
-		FindZeroCrossings(sddin, edges);
-	if(edges.empty())
+		nedges = m_detector.FindZeroCrossings(uadin, threshold, cmdBuf, queue);
+	else
 	{
-		SetData(NULL, 0);
+		din->PrepareForCpuAccess();
+
+		vector<int64_t> edges;
+		if(sadin)
+			FindZeroCrossings(sadin, m_parameters[m_threshname].GetFloatVal(), edges);
+		else if(uddin)
+			FindZeroCrossings(uddin, edges);
+		else if(sddin)
+			FindZeroCrossings(sddin, edges);
+		nedges = edges.size();
+
+		//Inefficient but this is a less frwuently used code path
+		vedges.resize(nedges);
+		vedges.PrepareForCpuAccess();
+		memcpy(vedges.GetCpuPointer(), &edges[0], nedges*sizeof(int64_t));
+	}
+	if(nedges == 0)
+	{
+		SetData(nullptr, 0);
 		return;
 	}
+
+	//Edge array
+	auto& edges = uadin ? m_detector.GetResults() : vedges;
+	edges.PrepareForCpuAccess();
 
 	//Get nominal period used for the first cycle of the NCO
 	int64_t initialPeriod = round(FS_PER_SECOND / m_parameters[m_baudname].GetFloatVal());
 	int64_t halfPeriod = initialPeriod / 2;
-	int64_t period = initialPeriod;
 
 	//Disallow frequencies higher than Nyquist of the input
-	auto fnyquist = 2*din->m_timescale;
-	if( period < fnyquist)
+	int64_t fnyquist = 2*din->m_timescale;
+	if( initialPeriod < fnyquist)
 	{
-		SetData(NULL, 0);
+		SetData(nullptr, 0);
 		return;
 	}
 
@@ -172,12 +193,70 @@ void ClockRecoveryFilter::Refresh()
 
 	//The actual PLL NCO
 	//TODO: use the real fibre channel PLL.
+	cap->m_offsets.reserve(edges.size());
+	if(gate)
+		InnerLoopWithGating(*cap, edges, nedges, tend, initialPeriod, halfPeriod, fnyquist, gate, sgate, ugate);
+	else
+		InnerLoopWithNoGating(*cap, edges, nedges, tend, initialPeriod, halfPeriod, fnyquist);
+
+	//Generate the squarewave and duration values to match the calculated timestamps
+	//TODO: GPU this?
+	//Important to FillDurations() after FillSquarewave() since FillDurations() expects to use sample size
+	#ifdef __x86_64__
+	if(g_hasAvx2)
+	{
+		FillSquarewaveAVX2(*cap);
+		FillDurationsAVX2(*cap);
+	}
+	else
+	#endif
+	{
+		FillSquarewaveGeneric(*cap);
+		FillDurationsGeneric(*cap);
+	}
+
+	SetData(cap, 0);
+
+	cap->MarkModifiedFromCpu();
+}
+
+/**
+	@brief Fills a waveform with a squarewave
+ */
+void ClockRecoveryFilter::FillSquarewaveGeneric(SparseDigitalWaveform& cap)
+{
+	size_t len = cap.m_offsets.size();
+	cap.m_samples.resize(len);
+
+	bool value = false;
+	for(size_t i=0; i<len; i++)
+	{
+		value = !value;
+		cap.m_samples[i] = value;
+	}
+}
+
+/**
+	@brief Main PLL inner loop supporting an external gate/squelch signal
+ */
+void ClockRecoveryFilter::InnerLoopWithGating(
+	SparseDigitalWaveform& cap,
+	AcceleratorBuffer<int64_t>& edges,
+	size_t nedges,
+	int64_t tend,
+	int64_t initialPeriod,
+	int64_t halfPeriod,
+	int64_t fnyquist,
+	WaveformBase* gate,
+	SparseDigitalWaveform* sgate,
+	UniformDigitalWaveform* ugate)
+{
+	size_t igate = 0;
 	size_t nedge = 1;
 	int64_t edgepos = edges[0];
-	bool value = false;
+	int64_t period = initialPeriod;
+
 	[[maybe_unused]] int64_t total_error = 0;
-	cap->m_samples.reserve(edges.size());
-	size_t igate = 0;
 
 	//If gated at T=0, start with output stopped
 	bool gating = false;
@@ -185,7 +264,7 @@ void ClockRecoveryFilter::Refresh()
 		gating = !GetValue(sgate, ugate, 0);
 
 	int64_t tlast = 0;
-	for(; (edgepos < tend) && (nedge < edges.size()-1); edgepos += period)
+	for(; (edgepos < tend) && (nedge < nedges-1); edgepos += period)
 	{
 		float center = period/2;
 
@@ -223,7 +302,7 @@ void ClockRecoveryFilter::Refresh()
 						vector<int64_t> lengths;
 						for(size_t i=1; i<=512; i++)
 						{
-							if(i + nedge >= edges.size())
+							if(i + nedge >= nedges)
 								break;
 							lengths.push_back(edges[nedge+i] - edges[nedge+i-1]);
 						}
@@ -271,7 +350,7 @@ void ClockRecoveryFilter::Refresh()
 		//If not, just run the NCO open loop.
 		//Allow multiple edges in the UI if the frequency is way off.
 		int64_t tnext = edges[nedge];
-		while( (tnext + center < edgepos) && (nedge+1 < edges.size()) )
+		while( (tnext + center < edgepos) && (nedge+1 < nedges) )
 		{
 			if(!gating)
 			{
@@ -284,7 +363,7 @@ void ClockRecoveryFilter::Refresh()
 				if(dphase < -halfPeriod)
 					dphase += period;
 
-				total_error += fabs(dphase);
+				total_error += i64abs(dphase);
 
 				//Find frequency error
 				int64_t uiLen = (tnext - tlast);
@@ -333,7 +412,7 @@ void ClockRecoveryFilter::Refresh()
 					if(period < fnyquist)
 					{
 						LogWarning("PLL attempted to lock to frequency near or above Nyquist\n");
-						nedge = edges.size();
+						nedge = nedges;
 						break;
 					}
 				}
@@ -345,19 +424,167 @@ void ClockRecoveryFilter::Refresh()
 
 		//Add the sample (90 deg phase offset from the internal NCO)
 		if(!gating)
-		{
-			value = !value;
-
-			cap->m_offsets.push_back(edgepos + period/2);
-			cap->m_durations.push_back(period);
-			cap->m_samples.push_back(value);
-		}
+			cap.m_offsets.push_back(edgepos + period/2);
 	}
 
 	total_error /= edges.size();
 	//LogTrace("average phase error %zu\n", total_error);
+}
 
-	SetData(cap, 0);
+void ClockRecoveryFilter::InnerLoopWithNoGating(
+	SparseDigitalWaveform& cap,
+	AcceleratorBuffer<int64_t>& edges,
+	size_t nedges,
+	int64_t tend,
+	int64_t initialPeriod,
+	int64_t halfPeriod,
+	int64_t fnyquist)
+{
+	size_t nedge = 1;
+	int64_t edgepos = edges[0];
 
-	cap->MarkModifiedFromCpu();
+	//[[maybe_unused]] int64_t total_error = 0;
+
+	float initialFrequency = 1.0 / initialPeriod;
+	int64_t glitchCutoff = initialPeriod / 10;
+	size_t edgemax = nedges - 1;
+	float fHalfPeriod = halfPeriod;
+
+	//Predict how many edges we're going to need and allocate space in advance
+	//(capture length divided by expected UI length plus 1M extra saples as of margin)
+	int64_t expectedNumEdges = (edges[edgemax] / initialPeriod) + 1000000;
+	cap.Reserve(expectedNumEdges);
+
+	int64_t tlast = 0;
+	int64_t iperiod = initialPeriod;
+	float fperiod = iperiod;
+	for(; (edgepos < tend) && (nedge < edgemax); edgepos += iperiod)
+	{
+		int64_t center = iperiod/2;
+
+		//See if the next edge occurred in this UI.
+		//If not, just run the NCO open loop.
+		//Allow multiple edges in the UI if the frequency is way off.
+		int64_t tnext = edges[nedge];
+		while( (tnext + center < edgepos) && (nedge < edgemax) )
+		{
+			//Find phase error
+			int64_t dphase = (edgepos - tnext) - iperiod;
+			float fdphase = dphase;
+
+			//If we're more than half a UI off, assume this is actually part of the next UI
+			if(fdphase > fHalfPeriod)
+				fdphase -= fperiod;
+			if(fdphase < -fHalfPeriod)
+				fdphase += fperiod;
+
+			//total_error += i64abs(dphase);
+
+			//Find frequency error
+			float uiLen = (tnext - tlast);
+			float fdperiod = 0;
+			if(uiLen > glitchCutoff)		//Sanity check: no correction if we have a glitch
+			{
+				float numUIs = roundf(uiLen * initialFrequency);
+				if(numUIs != 0)	//divide by zero check needed in some cases
+				{
+					uiLen /= numUIs;
+					fdperiod = fperiod - uiLen;
+				}
+			}
+
+			if(tlast != 0)
+			{
+				//Frequency and phase error term
+				float errorTerm = (fdperiod * 0.006) + (fdphase * 0.002);
+				fperiod -= errorTerm;
+				iperiod = fperiod;
+
+				//HACK: immediate bang-bang phase shift
+				int64_t bangbang = fperiod * 0.0025;
+				if(dphase > 0)
+					edgepos -= bangbang;
+				else
+					edgepos += bangbang;
+
+				/*
+				#ifdef PLL_DEBUG_OUTPUTS
+					debugPeriod->m_offsets.push_back(edgepos + period/2);
+					debugPeriod->m_durations.push_back(period);
+					debugPeriod->m_samples.push_back(period);
+
+					debugPhase->m_offsets.push_back(edgepos + period/2);
+					debugPhase->m_durations.push_back(period);
+					debugPhase->m_samples.push_back(dphase);
+
+					debugFreq->m_offsets.push_back(edgepos + period/2);
+					debugFreq->m_durations.push_back(period);
+					debugFreq->m_samples.push_back(dperiod);
+
+					debugDrift->m_offsets.push_back(edgepos + period/2);
+					debugDrift->m_durations.push_back(period);
+					debugDrift->m_samples.push_back(period - initialPeriod);
+				#endif
+				*/
+
+				if(iperiod < fnyquist)
+				{
+					LogWarning("PLL attempted to lock to frequency near or above Nyquist\n");
+					nedge = nedges;
+					break;
+				}
+			}
+
+			tlast = tnext;
+			tnext = edges[++nedge];
+		}
+
+		//Add the sample (90 deg phase offset from the internal NCO)
+		cap.m_offsets.push_back_nomarkmod(edgepos + center);
+	}
+
+	//total_error /= edges.size();
+	//LogTrace("average phase error %zu\n", total_error);
+}
+
+#ifdef __x86_64__
+/**
+	@brief AVX2 optimized version of FillSquarewaveGeneric()
+ */
+__attribute__((target("avx2")))
+void ClockRecoveryFilter::FillSquarewaveAVX2(SparseDigitalWaveform& cap)
+{
+	size_t len = cap.m_offsets.size();
+	cap.m_samples.resize(len);
+	if(!len)
+		return;
+
+	//Load the squarewave dummy fill pattern
+	bool filler[32] =
+	{
+		false, true, false, true, false, true, false, true,
+		false, true, false, true, false, true, false, true,
+		false, true, false, true, false, true, false, true,
+		false, true, false, true, false, true, false, true
+	};
+	auto fill = _mm256_loadu_si256(reinterpret_cast<__m256i*>(filler));
+
+	size_t end = len - (len % 32);
+	uint8_t* ptr = reinterpret_cast<uint8_t*>(&cap.m_samples[0]);
+	for(size_t i=0; i<end; i+=32)
+		_mm256_storeu_si256(reinterpret_cast<__m256i*>(ptr + i ), fill);
+
+	bool value = false;
+	for(size_t i=end; i<len; i++)
+	{
+		value = !value;
+		cap.m_samples[i] = value;
+	}
+}
+#endif /* __x86_64__ */
+
+Filter::DataLocation ClockRecoveryFilter::GetInputLocation()
+{
+	//We explicitly manage our input memory and don't care where it is when Refresh() is called
+	return LOC_DONTCARE;
 }

@@ -2,7 +2,7 @@
 *                                                                                                                      *
 * libscopehal                                                                                                          *
 *                                                                                                                      *
-* Copyright (c) 2012-2024 Andrew D. Zonenberg and contributors                                                         *
+* Copyright (c) 2012-2025 Andrew D. Zonenberg and contributors                                                         *
 * All rights reserved.                                                                                                 *
 *                                                                                                                      *
 * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
@@ -583,6 +583,21 @@ bool VulkanInit(bool skipGLFW)
 			}
 
 			LogDebug("Selected device %zu\n", bestDevice);
+
+			//Check if user wanted to override it
+			auto deviceOverride = getenv("SCOPEHAL_VULKAN_DEVICE_OVERRIDE");
+			if(deviceOverride)
+			{
+				auto ndev = atol(deviceOverride);
+				if( (ndev >= 0) && (ndev < (long)devices.size()) )
+				{
+					LogNotice("Automatic device selection overridden by SCOPEHAL_VULKAN_DEVICE_OVERRIDE, using device %ld instead\n", ndev);
+					bestDevice = ndev;
+				}
+				else
+					LogWarning("SCOPEHAL_VULKAN_DEVICE_OVERRIDE is set but has a nonsensical value, ignoring\n");
+			}
+
 			{
 				auto& device = devices[bestDevice];
 				g_vkComputePhysicalDevice = &devices[bestDevice];
@@ -984,7 +999,6 @@ bool VulkanInit(bool skipGLFW)
 
 	//If we get here, everything is good
 	g_gpuFilterEnabled = true;
-	g_gpuScopeDriverEnabled = true;
 
 	//Initialize the glsl compiler since vkFFT does JIT generation of kernels
 	if(1 != glslang_initialize_process())

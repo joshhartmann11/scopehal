@@ -2,7 +2,7 @@
 *                                                                                                                      *
 * libscopehal                                                                                                          *
 *                                                                                                                      *
-* Copyright (c) 2012-2024 Andrew D. Zonenberg and contributors                                                         *
+* Copyright (c) 2012-2025 Andrew D. Zonenberg and contributors                                                         *
 * All rights reserved.                                                                                                 *
 *                                                                                                                      *
 * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
@@ -137,7 +137,9 @@ public:
 	Unit operator*(const Unit& rhs);
 	Unit operator/(const Unit& rhs);
 
-	static void SetLocale(const char* locale);
+	bool IsLogarithmic();
+
+	static void InitializeLocales();
 
 protected:
 	UnitType m_type;
@@ -163,6 +165,11 @@ protected:
 	static locale_t m_defaultLocale;
 #endif
 
+	///@brief The decimal separator for pretty-printing in the user's selected locale
+	static char m_decimalSeparator;
+
+	//public so threads can properly set default locale on initialization, but should not be called by general user code
+public:
 	static void SetPrintingLocale();
 	static void SetDefaultLocale();
 };

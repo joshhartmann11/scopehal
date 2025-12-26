@@ -2,7 +2,7 @@
 *                                                                                                                      *
 * libscopehal                                                                                                          *
 *                                                                                                                      *
-* Copyright (c) 2012-2024 Andrew D. Zonenberg and contributors                                                         *
+* Copyright (c) 2012-2025 Andrew D. Zonenberg and contributors                                                         *
 * All rights reserved.                                                                                                 *
 *                                                                                                                      *
 * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the     *
@@ -55,6 +55,9 @@ TestWaveformSource::TestWaveformSource(minstd_rand& rng)
 	, m_cachedBinSize(0)
 	, m_rectangularComputePipeline("shaders/RectangularWindow.spv", 2, sizeof(WindowFunctionArgs))
 	, m_channelEmulationComputePipeline("shaders/DeEmbedFilter.spv", 3, sizeof(uint32_t))
+	, m_noisySineComputePipeline("shaders/NoisySine.spv", 1, sizeof(NoisySinePushConstants))
+	, m_noisySineSumComputePipeline("shaders/NoisySineSum.spv", 1, sizeof(NoisySineSumPushConstants))
+	, m_degradeComputePipeline("shaders/DegradeSerialData.spv", 2, sizeof(DegradeSerialDataPushConstants))
 	, m_cachedNumPoints(0)
 	, m_cachedRawSize(0)
 {
@@ -114,49 +117,58 @@ WaveformBase* TestWaveformSource::GenerateStep(
 /**
 	@brief Generates a sinewave with AWGN added
 
+	@param cmdBuf			Vulkan command buffer to use
+	@param queue			Vulkan queue to use
+	@param wfm				Waveform to fill
 	@param amplitude		P-P amplitude of the waveform in volts
 	@param startphase		Starting phase in radians
 	@param period			Period of the sine, in femtoseconds
 	@param sampleperiod		Interval between samples, in femtoseconds
 	@param depth			Total number of samples to generate
 	@param noise_stdev		Standard deviation of the AWGN in volts
-	@param downloadCallback	Callback for download progress
  */
-WaveformBase* TestWaveformSource::GenerateNoisySinewave(
+void TestWaveformSource::GenerateNoisySinewave(
+	vk::raii::CommandBuffer& cmdBuf,
+	shared_ptr<QueueHandle> queue,
+	UniformAnalogWaveform* wfm,
 	float amplitude,
 	float startphase,
 	float period,
 	int64_t sampleperiod,
 	size_t depth,
-	float noise_stdev,
-	std::function<void(float)> downloadCallback)
+	float noise_stdev)
 {
-	auto ret = new UniformAnalogWaveform("NoisySine");
-	ret->m_timescale = sampleperiod;
-	ret->Resize(depth);
+	wfm->m_triggerPhase = 0;
+	wfm->m_timescale = sampleperiod;
+	wfm->Resize(depth);
 
-	normal_distribution<> noise(0, noise_stdev);
-
+	//Calculate a bunch of constants
+	const int numThreads = 32768;
+	NoisySinePushConstants push;
 	float samples_per_cycle = period * 1.0 / sampleperiod;
-	float radians_per_sample = 2 * M_PI / samples_per_cycle;
+	push.numSamples = depth;
+	push.samplesPerThread = (depth + numThreads) / numThreads;
+	push.rngSeed = m_rng();
+	push.startPhase = startphase;
+	push.scale = amplitude / 2;	//sin is +/- 1, so need to divide amplitude by 2 to get scaling factor
+	push.sigma = noise_stdev;
+	push.radiansPerSample = 2 * M_PI / samples_per_cycle;
 
-	//sin is +/- 1, so need to divide amplitude by 2 to get scaling factor
-	float scale = amplitude / 2;
-
-	for(size_t i=0; i<depth; i++)
-	{
-		ret->m_samples[i] = scale * sinf(i*radians_per_sample + startphase) + noise(m_rng);
-
-		if( (i % 1024 == 0) && downloadCallback)
-			downloadCallback((float)i / (float)depth);
-	}
-
-	return ret;
+	//Do the actual waveform generation
+	cmdBuf.begin({});
+	m_noisySineComputePipeline.BindBufferNonblocking(0, wfm->m_samples, cmdBuf, true);
+	m_noisySineComputePipeline.Dispatch(cmdBuf, push, numThreads, 1);
+	wfm->MarkModifiedFromGpu();
+	cmdBuf.end();
+	queue->SubmitAndBlock(cmdBuf);
 }
 
 /**
 	@brief Generates a sum of two sinewaves with AWGN added
 
+	@param cmdBuf			Vulkan command buffer to use
+	@param queue			Vulkan queue to use
+	@param wfm				Waveform to fill
 	@param amplitude		P-P amplitude of the waveform in volts
 	@param startphase1		Starting phase of the first sine in radians
 	@param startphase2		Starting phase of the second sine in radians
@@ -165,9 +177,11 @@ WaveformBase* TestWaveformSource::GenerateNoisySinewave(
 	@param sampleperiod		Interval between samples, in femtoseconds
 	@param depth			Total number of samples to generate
 	@param noise_stdev		Standard deviation of the AWGN in volts
-	@param downloadCallback	Callback for download progress
  */
-WaveformBase* TestWaveformSource::GenerateNoisySinewaveSum(
+void TestWaveformSource::GenerateNoisySinewaveSum(
+	vk::raii::CommandBuffer& cmdBuf,
+	shared_ptr<QueueHandle> queue,
+	UniformAnalogWaveform* wfm,
 	float amplitude,
 	float startphase1,
 	float startphase2,
@@ -175,32 +189,34 @@ WaveformBase* TestWaveformSource::GenerateNoisySinewaveSum(
 	float period2,
 	int64_t sampleperiod,
 	size_t depth,
-	float noise_stdev,
-	std::function<void(float)> downloadCallback)
+	float noise_stdev)
 {
-	auto ret = new UniformAnalogWaveform("NoisySineSum");
-	ret->m_timescale = sampleperiod;
-	ret->Resize(depth);
+	wfm->m_triggerPhase = 0;
+	wfm->m_timescale = sampleperiod;
+	wfm->Resize(depth);
 
-	normal_distribution<> noise(0, noise_stdev);
+	//Calculate a bunch of constants
+	const int numThreads = 32768;
+	NoisySineSumPushConstants push;
+	float samples_per_cycle1 = period1 * 1.0 / sampleperiod;
+	float samples_per_cycle2 = period2 * 1.0 / sampleperiod;
+	push.numSamples = depth;
+	push.samplesPerThread = (depth + numThreads) / numThreads;
+	push.rngSeed = m_rng();
+	push.startPhase1 = startphase1;
+	push.startPhase2 = startphase2;
+	push.scale = amplitude / 4;	//sin is +/- 1, so need to divide amplitude by 4 to get scaling factor for sum
+	push.sigma = noise_stdev;
+	push.radiansPerSample1 = 2 * M_PI / samples_per_cycle1;
+	push.radiansPerSample2 = 2 * M_PI / samples_per_cycle2;
 
-	float radians_per_sample1 = 2 * M_PI * sampleperiod / period1;
-	float radians_per_sample2 = 2 * M_PI * sampleperiod / period2;
-
-	//sin is +/- 1, so need to divide amplitude by 2 to get scaling factor.
-	//Divide by 2 again to avoid clipping the sum of them
-	float scale = amplitude / 4;
-
-	for(size_t i=0; i<depth; i++)
-	{
-		ret->m_samples[i] = scale *
-			(sinf(i*radians_per_sample1 + startphase1) + sinf(i*radians_per_sample2 + startphase2))
-			+ noise(m_rng);
-		if( (i % 1024 == 0) && downloadCallback)
-			downloadCallback((float)i / (float)depth);
-	}
-
-	return ret;
+	//Do the actual waveform generation
+	cmdBuf.begin({});
+	m_noisySineSumComputePipeline.BindBufferNonblocking(0, wfm->m_samples, cmdBuf, true);
+	m_noisySineSumComputePipeline.Dispatch(cmdBuf, push, numThreads, 1);
+	wfm->MarkModifiedFromGpu();
+	cmdBuf.end();
+	queue->SubmitAndBlock(cmdBuf);
 }
 
 /**
@@ -208,6 +224,7 @@ WaveformBase* TestWaveformSource::GenerateNoisySinewaveSum(
 
 	@param cmdBuf			Vulkan command buffer to use for channel emulation
 	@param queue			Vulkan queue to use for channel emulation
+	@param wfm				Waveform to fill
 	@param amplitude		P-P amplitude of the waveform in volts
 	@param period			Unit interval, in femtoseconds
 	@param sampleperiod		Interval between samples, in femtoseconds
@@ -216,21 +233,20 @@ WaveformBase* TestWaveformSource::GenerateNoisySinewaveSum(
 	@param noise_stdev		Standard deviation of the AWGN in volts
 	@param downloadCallback	Callback for download progress
  */
-WaveformBase* TestWaveformSource::GeneratePRBS31(
+void TestWaveformSource::GeneratePRBS31(
 	vk::raii::CommandBuffer& cmdBuf,
 	shared_ptr<QueueHandle> queue,
+	UniformAnalogWaveform* wfm,
 	float amplitude,
 	float period,
 	int64_t sampleperiod,
 	size_t depth,
 	bool lpf,
-	float noise_stdev,
-	std::function<void(float)> downloadCallback
+	float noise_stdev
 	)
 {
-	auto ret = new UniformAnalogWaveform("PRBS31");
-	ret->m_timescale = sampleperiod;
-	ret->Resize(depth);
+	wfm->m_timescale = sampleperiod;
+	wfm->Resize(depth);
 
 	//Generate the PRBS as a square wave. Interpolate zero crossings as needed.
 	uint32_t prbs = rand();
@@ -255,7 +271,7 @@ WaveformBase* TestWaveformSource::GeneratePRBS31(
 
 		//Not an edge, just repeat the value
 		if(last == value)
-			ret->m_samples[i] = value ? scale : -scale;
+			wfm->m_samples[i] = value ? scale : -scale;
 
 		//Edge - interpolate
 		else
@@ -266,16 +282,11 @@ WaveformBase* TestWaveformSource::GeneratePRBS31(
 			float frac = 1 - (last_phase / sampleperiod);
 			float delta = cur_voltage - last_voltage;
 
-			ret->m_samples[i] = last_voltage + delta*frac;
+			wfm->m_samples[i] = last_voltage + delta*frac;
 		}
-
-		if( (i % 1024 == 0) && downloadCallback)
-			downloadCallback((float)i / (float)depth);
 	}
 
-	DegradeSerialData(ret, sampleperiod, depth, lpf, noise_stdev, cmdBuf, queue);
-
-	return ret;
+	DegradeSerialData(wfm, sampleperiod, depth, lpf, noise_stdev, cmdBuf, queue);
 }
 
 /**
@@ -291,20 +302,19 @@ WaveformBase* TestWaveformSource::GeneratePRBS31(
 	@param noise_stdev		Standard deviation of the AWGN in volts
 	@param downloadCallback	Callback for download progress
  */
-WaveformBase* TestWaveformSource::Generate8b10b(
+void TestWaveformSource::Generate8b10b(
 	vk::raii::CommandBuffer& cmdBuf,
 	shared_ptr<QueueHandle> queue,
+	UniformAnalogWaveform* wfm,
 	float amplitude,
 	float period,
 	int64_t sampleperiod,
 	size_t depth,
 	bool lpf,
-	float noise_stdev,
-	std::function<void(float)> downloadCallback)
+	float noise_stdev)
 {
-	auto ret = new UniformAnalogWaveform("8B10B");
-	ret->m_timescale = sampleperiod;
-	ret->Resize(depth);
+	wfm->m_timescale = sampleperiod;
+	wfm->Resize(depth);
 
 	const int patternlen = 20;
 	const bool pattern[patternlen] =
@@ -336,7 +346,7 @@ WaveformBase* TestWaveformSource::Generate8b10b(
 
 		//Not an edge, just repeat the value
 		if(last == value)
-			ret->m_samples[i] = value ? scale : -scale;
+			wfm->m_samples[i] = value ? scale : -scale;
 
 		//Edge - interpolate
 		else
@@ -347,16 +357,11 @@ WaveformBase* TestWaveformSource::Generate8b10b(
 			float frac = 1 - (last_phase / sampleperiod);
 			float delta = cur_voltage - last_voltage;
 
-			ret->m_samples[i] = last_voltage + delta*frac;
+			wfm->m_samples[i] = last_voltage + delta*frac;
 		}
-
-		if( (i % 1024 == 0) && downloadCallback)
-			downloadCallback((float)i / (float)depth);
 	}
 
-	DegradeSerialData(ret, sampleperiod, depth, lpf, noise_stdev, cmdBuf, queue);
-
-	return ret;
+	DegradeSerialData(wfm, sampleperiod, depth, lpf, noise_stdev, cmdBuf, queue);
 }
 
 /**
@@ -468,13 +473,6 @@ void TestWaveformSource::DegradeSerialData(
 		m_vkReversePlan->AppendReverse(m_forwardOutBuf, m_reverseOutBuf, cmdBuf);
 		m_reverseOutBuf.MarkModifiedFromGpu();
 
-		//Done, block until the compute operations finish
-		cmdBuf.end();
-		queue->SubmitAndBlock(cmdBuf);
-
-		//Next step on the CPU
-		m_reverseOutBuf.PrepareForCpuAccess();
-
 		//Calculate the group delay of the channel at the middle frequency bin
 		auto& s21 = m_sparams[SPair(2, 1)];
 		int64_t groupDelay = s21.GetGroupDelay(s21.size() / 2) * FS_PER_SECOND;
@@ -485,19 +483,39 @@ void TestWaveformSource::DegradeSerialData(
 		size_t iend = depth;
 		size_t finalLen = iend - istart;
 
-		//Rescale the FFT output and copy to the output, then add noise
-		float fftscale = 1.0f / npoints;
-		for(size_t i=0; i<finalLen; i++)
-			cap->m_samples[i] = m_reverseOutBuf[i + istart] * fftscale + (float)noise(m_rng);
+		//Calculate a bunch of constants
+		const int numThreads = 32768;
+		DegradeSerialDataPushConstants push;
+		push.numSamples = finalLen;
+		push.samplesPerThread = (finalLen + numThreads) / numThreads;
+		push.rngSeed = m_rng();
+		push.sigma = noise_stdev;
+		push.scale = 1.0f / npoints;
+		push.inputOffset = istart;
+
+		//Renormalize the output and degrade the data
+		m_degradeComputePipeline.AddComputeMemoryBarrier(cmdBuf);
+		m_degradeComputePipeline.BindBufferNonblocking(0, cap->m_samples, cmdBuf, true);
+		m_degradeComputePipeline.BindBufferNonblocking(1, m_reverseOutBuf, cmdBuf);
+		m_degradeComputePipeline.Dispatch(cmdBuf, push, numThreads, 1);
+
+		//Done, block until the compute operations finish
+		cmdBuf.end();
+		queue->SubmitAndBlock(cmdBuf);
+
+		//Updated on the GPU
+		cap->MarkModifiedFromGpu();
 
 		//Resize the waveform to truncate garbage at the end
 		cap->Resize(finalLen);
 	}
 
+	//TODO: GPU accelerate this path
 	else
 	{
 		for(size_t i=0; i<depth; i++)
 			cap->m_samples[i] += noise(m_rng);
+		cap->MarkModifiedFromCpu();
 	}
 }
 
