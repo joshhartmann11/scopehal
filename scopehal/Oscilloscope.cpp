@@ -88,7 +88,7 @@ void Oscilloscope::DoAddDriverClass(string name, CreateProcType proc)
 
 void Oscilloscope::EnumDrivers(vector<string>& names)
 {
-	for(CreateMapType::iterator it = m_createprocs.begin(); it != m_createprocs.end(); ++it)
+	for(CreateMapType::iterator it=m_createprocs.begin(); it != m_createprocs.end(); ++it)
 		names.push_back(it->first);
 }
 
@@ -117,7 +117,7 @@ bool Oscilloscope::CanEnableChannel(size_t /*i*/)
 int Oscilloscope::GetEnabledChannelCount()
 {
 	int result = 0;
-	for(size_t i = 0; i < GetChannelCount(); i++)
+	for(size_t i=0; i<GetChannelCount(); i++)
 	{
 		if(IsChannelEnabled(i))
 			result++;
@@ -125,12 +125,13 @@ int Oscilloscope::GetEnabledChannelCount()
 	return result;
 }
 
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Triggering helpers
 
 bool Oscilloscope::WaitForTrigger(int timeout)
 {
-	for(int i = 0; i < timeout * 100; i++)
+	for(int i=0; i<timeout*100; i++)
 	{
 		if(HasPendingWaveforms())
 			return true;
@@ -210,7 +211,9 @@ size_t Oscilloscope::GetNumAverages(size_t /*i*/)
 
 void Oscilloscope::SetNumAverages(size_t /*i*/, size_t /*navg*/)
 {
+
 }
+
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Serialization
@@ -234,7 +237,7 @@ void Oscilloscope::DoSerializeConfiguration(YAML::Node& node, IDTable& table)
 		node["span"] = GetSpan();
 
 	//Save channels
-	for(size_t i = 0; i < GetChannelCount(); i++)
+	for(size_t i=0; i<GetChannelCount(); i++)
 	{
 		auto chan = GetOscilloscopeChannel(i);
 		YAML::Node channelNode = channels["ch" + to_string(i)];
@@ -349,7 +352,7 @@ void Oscilloscope::DoSerializeConfiguration(YAML::Node& node, IDTable& table)
 			YAML::Node streams;
 			channelNode["nstreams"] = nstreams;
 
-			for(size_t j = 0; j < nstreams; j++)
+			for(size_t j=0; j<nstreams; j++)
 			{
 				YAML::Node stream;
 				stream["index"] = j;
@@ -488,7 +491,7 @@ void Oscilloscope::DoLoadConfiguration(int version, const YAML::Node& node, IDTa
 						chan->SetOffset(st.second["offset"].as<float>(), index);
 				}
 
-				for(size_t j = 0; j < nstreams; j++)
+				for(size_t j=0; j<nstreams; j++)
 					chan->AddStream(yunit, names[j], stype);
 			}
 		}
@@ -540,7 +543,7 @@ void Oscilloscope::DoLoadConfiguration(int version, const YAML::Node& node, IDTa
 	{
 		if(node["interleave"])
 		{
-			if(version == 0)
+			if (version == 0)
 				SetInterleaving(node["interleave"].as<int>() == 1);
 			else
 				SetInterleaving(node["interleave"].as<bool>());
@@ -581,7 +584,10 @@ void Oscilloscope::DoLoadConfiguration(int version, const YAML::Node& node, IDTa
 }
 
 void Oscilloscope::DoPreLoadConfiguration(
-	int /*version*/, const YAML::Node& node, IDTable& /*idmap*/, ConfigWarningList& /*list*/)
+	int /*version*/,
+	const YAML::Node& node,
+	IDTable& /*idmap*/,
+	ConfigWarningList& /*list*/)
 {
 	//Create a dummy warning message
 	//list.m_warnings[this].m_messages.push_back(ConfigWarningMessage(
@@ -803,7 +809,7 @@ vector<Oscilloscope::AnalogBank> Oscilloscope::GetAnalogBanks()
 Oscilloscope::AnalogBank Oscilloscope::GetAnalogBank(size_t /*channel*/)
 {
 	AnalogBank ret;
-	for(size_t i = 0; i < m_channels.size(); i++)
+	for(size_t i=0; i<m_channels.size(); i++)
 	{
 		auto chan = GetOscilloscopeChannel(i);
 		if(chan == nullptr)
@@ -858,10 +864,10 @@ bool Oscilloscope::IsInverted(size_t /*i*/)
 
 void Oscilloscope::ChannelsDownloadStarted()
 {
-	for(size_t i = 0; i < m_channels.size(); i++)
+	for (size_t i = 0; i < m_channels.size(); i++)
 	{
 		auto chan = GetOscilloscopeChannel(i);
-		if(chan == nullptr)
+		if (chan == nullptr)
 			continue;
 
 		chan->m_downloadState = InstrumentChannel::DownloadState::DOWNLOAD_WAITING;
@@ -873,7 +879,7 @@ void Oscilloscope::ChannelsDownloadStarted()
 void Oscilloscope::ChannelsDownloadStatusUpdate(size_t ch, InstrumentChannel::DownloadState state, float progress)
 {
 	auto chan = GetOscilloscopeChannel(ch);
-	if(chan == nullptr)
+	if (chan == nullptr)
 		return;
 
 	chan->m_downloadState = state;
@@ -882,10 +888,10 @@ void Oscilloscope::ChannelsDownloadStatusUpdate(size_t ch, InstrumentChannel::Do
 
 void Oscilloscope::ChannelsDownloadFinished()
 {
-	for(size_t i = 0; i < m_channels.size(); i++)
+	for (size_t i = 0; i < m_channels.size(); i++)
 	{
 		auto chan = GetOscilloscopeChannel(i);
-		if(chan == nullptr)
+		if (chan == nullptr)
 			continue;
 
 		chan->m_downloadState = InstrumentChannel::DownloadState::DOWNLOAD_NONE;
@@ -971,24 +977,34 @@ void Oscilloscope::Convert8BitSamples(float* pout, const int8_t* pin, float gain
 		size_t blocksize = count / numblocks;
 		blocksize = blocksize - (blocksize % 32);
 
-#pragma omp parallel for
-		for(size_t i = 0; i < numblocks; i++)
+		#pragma omp parallel for
+		for(size_t i=0; i<numblocks; i++)
 		{
 			//Last block gets any extra that didn't divide evenly
 			size_t nsamp = blocksize;
 			if(i == lastblock)
-				nsamp = count - i * blocksize;
+				nsamp = count - i*blocksize;
 
-			size_t off = i * blocksize;
-#ifdef __x86_64__
+			size_t off = i*blocksize;
+			#ifdef __x86_64__
 			if(g_hasAvx2)
 			{
-				Convert8BitSamplesAVX2(pout + off, pin + off, gain, offset, nsamp);
+				Convert8BitSamplesAVX2(
+					pout + off,
+					pin + off,
+					gain,
+					offset,
+					nsamp);
 			}
 			else
-#endif /* __x86_64__ */
+			#endif /* __x86_64__ */
 			{
-				Convert8BitSamplesGeneric(pout + off, pin + off, gain, offset, nsamp);
+				Convert8BitSamplesGeneric(
+					pout + off,
+					pin + off,
+					gain,
+					offset,
+					nsamp);
 			}
 		}
 	}
@@ -996,11 +1012,11 @@ void Oscilloscope::Convert8BitSamples(float* pout, const int8_t* pin, float gain
 	//Small waveforms get done single threaded to avoid overhead
 	else
 	{
-#ifdef __x86_64__
+		#ifdef __x86_64__
 		if(g_hasAvx2)
 			Convert8BitSamplesAVX2(pout, pin, gain, offset, count);
 		else
-#endif
+		#endif
 			Convert8BitSamplesGeneric(pout, pin, gain, offset, count);
 	}
 }
@@ -1010,7 +1026,7 @@ void Oscilloscope::Convert8BitSamples(float* pout, const int8_t* pin, float gain
  */
 void Oscilloscope::Convert8BitSamplesGeneric(float* pout, const int8_t* pin, float gain, float offset, size_t count)
 {
-	for(unsigned int k = 0; k < count; k++)
+	for(unsigned int k=0; k<count; k++)
 		pout[k] = pin[k] * gain - offset;
 }
 
@@ -1018,15 +1034,15 @@ void Oscilloscope::Convert8BitSamplesGeneric(float* pout, const int8_t* pin, flo
 /**
 	@brief Optimized version of Convert8BitSamples()
  */
-__attribute__((target("avx2"))) void Oscilloscope::Convert8BitSamplesAVX2(
-	float* pout, const int8_t* pin, float gain, float offset, size_t count)
+__attribute__((target("avx2")))
+void Oscilloscope::Convert8BitSamplesAVX2(float* pout, const int8_t* pin, float gain, float offset, size_t count)
 {
 	unsigned int end = count - (count % 32);
 
-	__m256 gains = {gain, gain, gain, gain, gain, gain, gain, gain};
-	__m256 offsets = {offset, offset, offset, offset, offset, offset, offset, offset};
+	__m256 gains = { gain, gain, gain, gain, gain, gain, gain, gain };
+	__m256 offsets = { offset, offset, offset, offset, offset, offset, offset, offset };
 
-	for(unsigned int k = 0; k < end; k += 32)
+	for(unsigned int k=0; k<end; k += 32)
 	{
 		//Load all 32 raw ADC samples, without assuming alignment
 		//(on most modern Intel processors, load and loadu have same latency/throughput)
@@ -1066,14 +1082,14 @@ __attribute__((target("avx2"))) void Oscilloscope::Convert8BitSamplesAVX2(
 		block3_float = _mm256_sub_ps(block3_float, offsets);
 
 		//All done, store back to the output buffer
-		_mm256_store_ps(pout + k, block0_float);
-		_mm256_store_ps(pout + k + 8, block1_float);
-		_mm256_store_ps(pout + k + 16, block2_float);
-		_mm256_store_ps(pout + k + 24, block3_float);
+		_mm256_store_ps(pout + k, 		block0_float);
+		_mm256_store_ps(pout + k + 8,	block1_float);
+		_mm256_store_ps(pout + k + 16,	block2_float);
+		_mm256_store_ps(pout + k + 24,	block3_float);
 	}
 
 	//Get any extras we didn't get in the SIMD loop
-	for(unsigned int k = end; k < count; k++)
+	for(unsigned int k=end; k<count; k++)
 		pout[k] = pin[k] * gain - offset;
 }
 #endif /* __x86_64__ */
@@ -1093,24 +1109,34 @@ void Oscilloscope::ConvertUnsigned8BitSamples(float* pout, const uint8_t* pin, f
 		size_t blocksize = count / numblocks;
 		blocksize = blocksize - (blocksize % 32);
 
-#pragma omp parallel for
-		for(size_t i = 0; i < numblocks; i++)
+		#pragma omp parallel for
+		for(size_t i=0; i<numblocks; i++)
 		{
 			//Last block gets any extra that didn't divide evenly
 			size_t nsamp = blocksize;
 			if(i == lastblock)
-				nsamp = count - i * blocksize;
+				nsamp = count - i*blocksize;
 
-			size_t off = i * blocksize;
-#ifdef __x86_64__
+			size_t off = i*blocksize;
+			#ifdef __x86_64__
 			if(g_hasAvx2)
 			{
-				ConvertUnsigned8BitSamplesAVX2(pout + off, pin + off, gain, offset, nsamp);
+				ConvertUnsigned8BitSamplesAVX2(
+					pout + off,
+					pin + off,
+					gain,
+					offset,
+					nsamp);
 			}
 			else
-#endif
+			#endif
 			{
-				ConvertUnsigned8BitSamplesGeneric(pout + off, pin + off, gain, offset, nsamp);
+				ConvertUnsigned8BitSamplesGeneric(
+					pout + off,
+					pin + off,
+					gain,
+					offset,
+					nsamp);
 			}
 		}
 	}
@@ -1118,11 +1144,11 @@ void Oscilloscope::ConvertUnsigned8BitSamples(float* pout, const uint8_t* pin, f
 	//Small waveforms get done single threaded to avoid overhead
 	else
 	{
-#ifdef __x86_64__
+		#ifdef __x86_64__
 		if(g_hasAvx2)
 			ConvertUnsigned8BitSamplesAVX2(pout, pin, gain, offset, count);
 		else
-#endif
+		#endif
 			ConvertUnsigned8BitSamplesGeneric(pout, pin, gain, offset, count);
 	}
 }
@@ -1130,10 +1156,9 @@ void Oscilloscope::ConvertUnsigned8BitSamples(float* pout, const uint8_t* pin, f
 /**
 	@brief Generic backend for ConvertUnsigned8BitSamples()
  */
-void Oscilloscope::ConvertUnsigned8BitSamplesGeneric(
-	float* pout, const uint8_t* pin, float gain, float offset, size_t count)
+void Oscilloscope::ConvertUnsigned8BitSamplesGeneric(float* pout, const uint8_t* pin, float gain, float offset, size_t count)
 {
-	for(unsigned int k = 0; k < count; k++)
+	for(unsigned int k=0; k<count; k++)
 		pout[k] = pin[k] * gain - offset;
 }
 
@@ -1141,15 +1166,15 @@ void Oscilloscope::ConvertUnsigned8BitSamplesGeneric(
 /**
 	@brief Optimized version of ConvertUnsigned8BitSamples()
  */
-__attribute__((target("avx2"))) void Oscilloscope::ConvertUnsigned8BitSamplesAVX2(
-	float* pout, const uint8_t* pin, float gain, float offset, size_t count)
+__attribute__((target("avx2")))
+void Oscilloscope::ConvertUnsigned8BitSamplesAVX2(float* pout, const uint8_t* pin, float gain, float offset, size_t count)
 {
 	unsigned int end = count - (count % 32);
 
-	__m256 gains = {gain, gain, gain, gain, gain, gain, gain, gain};
-	__m256 offsets = {offset, offset, offset, offset, offset, offset, offset, offset};
+	__m256 gains = { gain, gain, gain, gain, gain, gain, gain, gain };
+	__m256 offsets = { offset, offset, offset, offset, offset, offset, offset, offset };
 
-	for(unsigned int k = 0; k < end; k += 32)
+	for(unsigned int k=0; k<end; k += 32)
 	{
 		//Load all 32 raw ADC samples, without assuming alignment
 		//(on most modern Intel processors, load and loadu have same latency/throughput)
@@ -1189,14 +1214,14 @@ __attribute__((target("avx2"))) void Oscilloscope::ConvertUnsigned8BitSamplesAVX
 		block3_float = _mm256_sub_ps(block3_float, offsets);
 
 		//All done, store back to the output buffer
-		_mm256_store_ps(pout + k, block0_float);
-		_mm256_store_ps(pout + k + 8, block1_float);
-		_mm256_store_ps(pout + k + 16, block2_float);
-		_mm256_store_ps(pout + k + 24, block3_float);
+		_mm256_store_ps(pout + k, 		block0_float);
+		_mm256_store_ps(pout + k + 8,	block1_float);
+		_mm256_store_ps(pout + k + 16,	block2_float);
+		_mm256_store_ps(pout + k + 24,	block3_float);
 	}
 
 	//Get any extras we didn't get in the SIMD loop
-	for(unsigned int k = end; k < count; k++)
+	for(unsigned int k=end; k<count; k++)
 		pout[k] = pin[k] * gain - offset;
 }
 #endif /* __x86_64__ */
@@ -1219,35 +1244,55 @@ void Oscilloscope::Convert16BitSamples(float* pout, const int16_t* pin, float ga
 		size_t blocksize = count / numblocks;
 		blocksize = blocksize - (blocksize % 64);
 
-#pragma omp parallel for
-		for(size_t i = 0; i < numblocks; i++)
+		#pragma omp parallel for
+		for(size_t i=0; i<numblocks; i++)
 		{
 			//Last block gets any extra that didn't divide evenly
 			size_t nsamp = blocksize;
 			if(i == lastblock)
-				nsamp = count - i * blocksize;
+				nsamp = count - i*blocksize;
 
-			size_t off = i * blocksize;
-#ifdef __x86_64__
+			size_t off = i*blocksize;
+			#ifdef __x86_64__
 			if(g_hasAvx512F)
 			{
-				Convert16BitSamplesAVX512F(pout + off, pin + off, gain, offset, nsamp);
+				Convert16BitSamplesAVX512F(
+					pout + off,
+					pin + off,
+					gain,
+					offset,
+					nsamp);
 			}
 			else if(g_hasAvx2)
 			{
 				if(g_hasFMA)
 				{
-					Convert16BitSamplesFMA(pout + off, pin + off, gain, offset, nsamp);
+					Convert16BitSamplesFMA(
+						pout + off,
+						pin + off,
+						gain,
+						offset,
+						nsamp);
 				}
 				else
 				{
-					Convert16BitSamplesAVX2(pout + off, pin + off, gain, offset, nsamp);
+					Convert16BitSamplesAVX2(
+						pout + off,
+						pin + off,
+						gain,
+						offset,
+						nsamp);
 				}
 			}
 			else
-#endif /* __x86_64__ */
+			#endif /* __x86_64__ */
 			{
-				Convert16BitSamplesGeneric(pout + off, pin + off, gain, offset, nsamp);
+				Convert16BitSamplesGeneric(
+					pout + off,
+					pin + off,
+					gain,
+					offset,
+					nsamp);
 			}
 		}
 	}
@@ -1255,7 +1300,7 @@ void Oscilloscope::Convert16BitSamples(float* pout, const int16_t* pin, float ga
 	//Small waveforms get done single threaded to avoid overhead
 	else
 	{
-#ifdef __x86_64__
+		#ifdef __x86_64__
 		if(g_hasAvx2)
 		{
 			if(g_hasFMA)
@@ -1264,7 +1309,7 @@ void Oscilloscope::Convert16BitSamples(float* pout, const int16_t* pin, float ga
 				Convert16BitSamplesAVX2(pout, pin, gain, offset, count);
 		}
 		else
-#endif /* __x86_64__ */
+		#endif /* __x86_64__ */
 			Convert16BitSamplesGeneric(pout, pin, gain, offset, count);
 	}
 }
@@ -1274,20 +1319,20 @@ void Oscilloscope::Convert16BitSamples(float* pout, const int16_t* pin, float ga
  */
 void Oscilloscope::Convert16BitSamplesGeneric(float* pout, const int16_t* pin, float gain, float offset, size_t count)
 {
-	for(size_t j = 0; j < count; j++)
-		pout[j] = gain * pin[j] - offset;
+	for(size_t j=0; j<count; j++)
+		pout[j] = gain*pin[j] - offset;
 }
 
 #ifdef __x86_64__
-__attribute__((target("avx2"))) void Oscilloscope::Convert16BitSamplesAVX2(
-	float* pout, const int16_t* pin, float gain, float offset, size_t count)
+__attribute__((target("avx2")))
+void Oscilloscope::Convert16BitSamplesAVX2(float* pout, const int16_t* pin, float gain, float offset, size_t count)
 {
 	size_t end = count - (count % 32);
 
-	__m256 gains = {gain, gain, gain, gain, gain, gain, gain, gain};
-	__m256 offsets = {offset, offset, offset, offset, offset, offset, offset, offset};
+	__m256 gains = { gain, gain, gain, gain, gain, gain, gain, gain };
+	__m256 offsets = { offset, offset, offset, offset, offset, offset, offset, offset };
 
-	for(size_t k = 0; k < end; k += 32)
+	for(size_t k=0; k<end; k += 32)
 	{
 		//Load all 32 raw ADC samples, without assuming alignment
 		//(on most modern Intel processors, load and loadu have same latency/throughput)
@@ -1325,26 +1370,26 @@ __attribute__((target("avx2"))) void Oscilloscope::Convert16BitSamplesAVX2(
 		block3_float = _mm256_sub_ps(block3_float, offsets);
 
 		//All done, store back to the output buffer
-		_mm256_store_ps(pout + k, block0_float);
-		_mm256_store_ps(pout + k + 8, block1_float);
-		_mm256_store_ps(pout + k + 16, block2_float);
-		_mm256_store_ps(pout + k + 24, block3_float);
+		_mm256_store_ps(pout + k, 		block0_float);
+		_mm256_store_ps(pout + k + 8,	block1_float);
+		_mm256_store_ps(pout + k + 16,	block2_float);
+		_mm256_store_ps(pout + k + 24,	block3_float);
 	}
 
 	//Get any extras we didn't get in the SIMD loop
-	for(size_t k = end; k < count; k++)
+	for(size_t k=end; k<count; k++)
 		pout[k] = pin[k] * gain - offset;
 }
 
-__attribute__((target("avx2,fma"))) void Oscilloscope::Convert16BitSamplesFMA(
-	float* pout, const int16_t* pin, float gain, float offset, size_t count)
+__attribute__((target("avx2,fma")))
+void Oscilloscope::Convert16BitSamplesFMA(float* pout, const int16_t* pin, float gain, float offset, size_t count)
 {
 	size_t end = count - (count % 64);
 
-	__m256 gains = {gain, gain, gain, gain, gain, gain, gain, gain};
-	__m256 offsets = {offset, offset, offset, offset, offset, offset, offset, offset};
+	__m256 gains = { gain, gain, gain, gain, gain, gain, gain, gain };
+	__m256 offsets = { offset, offset, offset, offset, offset, offset, offset, offset };
 
-	for(size_t k = 0; k < end; k += 64)
+	for(size_t k=0; k<end; k += 64)
 	{
 		//Load all 64 raw ADC samples, without assuming alignment
 		//(on most modern Intel processors, load and loadu have same latency/throughput)
@@ -1395,19 +1440,19 @@ __attribute__((target("avx2,fma"))) void Oscilloscope::Convert16BitSamplesFMA(
 		block7_float = _mm256_fmsub_ps(block7_float, gains, offsets);
 
 		//All done, store back to the output buffer
-		_mm256_store_ps(pout + k, block0_float);
-		_mm256_store_ps(pout + k + 8, block1_float);
-		_mm256_store_ps(pout + k + 16, block2_float);
-		_mm256_store_ps(pout + k + 24, block3_float);
+		_mm256_store_ps(pout + k, 		block0_float);
+		_mm256_store_ps(pout + k + 8,	block1_float);
+		_mm256_store_ps(pout + k + 16,	block2_float);
+		_mm256_store_ps(pout + k + 24,	block3_float);
 
-		_mm256_store_ps(pout + k + 32, block4_float);
-		_mm256_store_ps(pout + k + 40, block5_float);
-		_mm256_store_ps(pout + k + 48, block6_float);
-		_mm256_store_ps(pout + k + 56, block7_float);
+		_mm256_store_ps(pout + k + 32,	block4_float);
+		_mm256_store_ps(pout + k + 40,	block5_float);
+		_mm256_store_ps(pout + k + 48,	block6_float);
+		_mm256_store_ps(pout + k + 56,	block7_float);
 	}
 
 	//Get any extras we didn't get in the SIMD loop
-	for(size_t k = end; k < count; k++)
+	for(size_t k=end; k<count; k++)
 		pout[k] = pin[k] * gain - offset;
 }
 
@@ -1416,15 +1461,15 @@ __attribute__((target("avx2,fma"))) void Oscilloscope::Convert16BitSamplesFMA(
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #endif
-__attribute__((target("avx512f"))) void Oscilloscope::Convert16BitSamplesAVX512F(
-	float* pout, const int16_t* pin, float gain, float offset, size_t count)
+__attribute__((target("avx512f")))
+void Oscilloscope::Convert16BitSamplesAVX512F(float* pout, const int16_t* pin, float gain, float offset, size_t count)
 {
 	size_t end = count - (count % 64);
 
 	__m512 gains = _mm512_set1_ps(gain);
 	__m512 offsets = _mm512_set1_ps(offset);
 
-	for(size_t k = 0; k < end; k += 64)
+	for(size_t k=0; k<end; k += 64)
 	{
 		//Load all 64 raw ADC samples, without assuming alignment
 		//(on most modern Intel processors, load and loadu have same latency/throughput)
@@ -1457,14 +1502,14 @@ __attribute__((target("avx512f"))) void Oscilloscope::Convert16BitSamplesAVX512F
 		block3_float = _mm512_fmsub_ps(block3_float, gains, offsets);
 
 		//All done, store back to the output buffer
-		_mm512_store_ps(pout + k, block0_float);
-		_mm512_store_ps(pout + k + 16, block1_float);
-		_mm512_store_ps(pout + k + 32, block2_float);
-		_mm512_store_ps(pout + k + 48, block3_float);
+		_mm512_store_ps(pout + k, 		block0_float);
+		_mm512_store_ps(pout + k + 16,	block1_float);
+		_mm512_store_ps(pout + k + 32,	block2_float);
+		_mm512_store_ps(pout + k + 48,	block3_float);
 	}
 
 	//Get any extras we didn't get in the SIMD loop
-	for(size_t k = end; k < count; k++)
+	for(size_t k=end; k<count; k++)
 		pout[k] = pin[k] * gain - offset;
 }
 #if !defined(__llvm__) && ((__GNUC__ < 12) || ((__GNUC__ == 12) && (__GNUC_MINOR <= 2)))
@@ -1472,3 +1517,4 @@ __attribute__((target("avx512f"))) void Oscilloscope::Convert16BitSamplesAVX512F
 #endif
 
 #endif /* __x86_64__ */
+

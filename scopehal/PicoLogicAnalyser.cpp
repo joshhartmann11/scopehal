@@ -185,30 +185,15 @@ void PicoLogicAnalyser::FlushConfigCache()
 
 bool PicoLogicAnalyser::IsChannelEnabled(size_t i)
 {
-	lock_guard<recursive_mutex> lock(m_cacheMutex);
-	return m_channelsEnabled[i];
+	return true;
 }
 
 void PicoLogicAnalyser::EnableChannel(size_t i)
 {
-	{
-		lock_guard<recursive_mutex> lock(m_cacheMutex);
-		m_channelsEnabled[i] = true;
-		return;
-	}
-
-	RemoteBridgeOscilloscope::EnableChannel(i);
 }
 
 void PicoLogicAnalyser::DisableChannel(size_t i)
 {
-	{
-		lock_guard<recursive_mutex> lock(m_cacheMutex);
-		m_channelsEnabled[i] = false;
-	}
-
-	lock_guard<recursive_mutex> lock(m_mutex);
-	m_transport->SendCommand(":" + m_channels[i]->GetHwname() + ":OFF");
 }
 
 vector<OscilloscopeChannel::CouplingType> PicoLogicAnalyser::GetAvailableCouplings(size_t /*i*/)
@@ -261,119 +246,91 @@ Oscilloscope::TriggerMode PicoLogicAnalyser::PollTrigger()
 	return TRIGGER_MODE_TRIGGERED;
 }
 
+// TODO(josh): lots of assumptions here, assuming members reflect state of LA at time of aquisition. This isn't necessarily true,
+// this information could be added to the data in the data aquisition
 bool PicoLogicAnalyser::AcquireData()
 {
-#pragma pack(push, 1)
-	struct
+	size_t word_size = 4;
+	size_t samples_per_word = (word_size * 8) - ((word_size * 8) % m_digitalChannelCount);
+	size_t words_per_capture = (GetSampleDepth() * m_digitalChannelCount + samples_per_word - 1) / samples_per_word;
+	uint32_t* buf = new uint32_t[words_per_capture];
+
+	// Read data
+	if(!m_transport->ReadRawData(words_per_capture * word_size, (unsigned char*)buf))
 	{
-		//Number of channels in the current waveform
-		uint16_t numChannels;
-
-		//Sample interval.
-		//May be different from m_srate if we changed the rate after the trigger was armed
-		int64_t fs_per_sample;
-	} wfmhdrs;
-#pragma pack(pop)
-
-	//Read global waveform settings (independent of each channel)
-	if(!m_transport->ReadRawData(sizeof(wfmhdrs), (uint8_t*)&wfmhdrs))
+		LogWarning("Couldn't read data from socket\n");
 		return false;
-	uint16_t numChannels = wfmhdrs.numChannels;
-	int64_t fs_per_sample = wfmhdrs.fs_per_sample;
-
-	//Acquire data for each channel
-	size_t memdepth;
-	float config[3];
-	SequenceSet s;
-	double t = GetTime();
-	int64_t fs = (t - floor(t)) * FS_PER_SECOND;
-
-	for(size_t i = 0; i < numChannels; i++)
-	{
-		size_t tmp[2];
-
-		//Get channel ID and memory depth (samples, not bytes)
-		if(!m_transport->ReadRawData(sizeof(tmp), (uint8_t*)&tmp))
-			return false;
-		memdepth = tmp[1];
-
-		int16_t* buf = new int16_t[memdepth];
-
-		float trigphase;
-		if(!m_transport->ReadRawData(sizeof(trigphase), (uint8_t*)&trigphase))
-			return false;
-		trigphase = -trigphase * fs_per_sample;
-		if(!m_transport->ReadRawData(memdepth * sizeof(int16_t), (uint8_t*)buf))
-			return false;
-
-		//Create buffers for output waveforms
-		SparseDigitalWaveform* caps[8];
-		for(size_t j = 0; j < 8; j++)
-		{
-			auto nchan = 8 * i + j;
-			caps[j] = AllocateDigitalWaveform(m_nickname + "." + GetOscilloscopeChannel(nchan)->GetHwname());
-			s[GetOscilloscopeChannel(nchan)] = caps[j];
-		}
-
-//Now that we have the waveform data, unpack it into individual channels
-#pragma omp parallel for
-		for(size_t j = 0; j < 8; j++)
-		{
-			//Bitmask for this digital channel
-			int16_t mask = (1 << j);
-
-			//Create the waveform
-			auto cap = caps[j];
-			cap->m_timescale = fs_per_sample;
-			cap->m_triggerPhase = trigphase;
-			cap->m_startTimestamp = time(NULL);
-			cap->m_startFemtoseconds = fs;
-
-			//Preallocate memory assuming no deduplication possible
-			cap->Resize(memdepth);
-			cap->PrepareForCpuAccess();
-
-			//First sample never gets deduplicated
-			bool last = (buf[0] & mask) ? true : false;
-			size_t k = 0;
-			cap->m_offsets[0] = 0;
-			cap->m_durations[0] = 1;
-			cap->m_samples[0] = last;
-
-			//Read and de-duplicate the other samples
-			//TODO: can we vectorize this somehow?
-			for(size_t m = 1; m < memdepth; m++)
-			{
-				bool sample = (buf[m] & mask) ? true : false;
-
-				//Deduplicate consecutive samples with same value
-				//FIXME: temporary workaround for rendering bugs
-				//if(last == sample)
-				if((last == sample) && ((m + 3) < memdepth))
-					cap->m_durations[k]++;
-
-				//Nope, it toggled - store the new value
-				else
-				{
-					k++;
-					cap->m_offsets[k] = m;
-					cap->m_durations[k] = 1;
-					cap->m_samples[k] = sample;
-					last = sample;
-				}
-			}
-
-			//Free space reclaimed by deduplication
-			cap->Resize(k);
-			cap->m_offsets.shrink_to_fit();
-			cap->m_durations.shrink_to_fit();
-			cap->m_samples.shrink_to_fit();
-			cap->MarkSamplesModifiedFromCpu();
-			cap->MarkTimestampsModifiedFromCpu();
-		}
-
-		delete[] buf;
 	}
+
+	// Create waveform for each channel
+	SparseDigitalWaveform* caps[32];	// Max possible channels
+	SequenceSet s;
+	for(size_t channel_idx = 0; channel_idx < m_digitalChannelCount; channel_idx++)
+	{
+		caps[channel_idx] =
+			AllocateDigitalWaveform(m_nickname + "." + GetOscilloscopeChannel(channel_idx)->GetHwname());
+		s[GetOscilloscopeChannel(channel_idx)] = caps[channel_idx];
+	}
+
+	// Unpack waveform
+	double now = GetTime();
+	for(size_t channel_idx = 0; channel_idx < m_digitalChannelCount; channel_idx++)
+	{
+		auto cap = caps[channel_idx];
+		cap->m_timescale = FS_PER_SECOND / GetSampleRate();
+		cap->m_triggerPhase = 0;
+		cap->m_startTimestamp = floor(now);
+		cap->m_startFemtoseconds = (now - floor(now)) * FS_PER_SECOND;
+
+		// Preallocate memory assuming no deduplication possible
+		cap->Resize(m_mdepth);
+		cap->PrepareForCpuAccess();
+
+		size_t sample_idx = 0;
+		size_t buf_index = sample_idx / samples_per_word;
+		size_t word_index = samples_per_word * (sample_idx % samples_per_word);
+		bool sample = (buf[buf_index] >> word_index) & 1;
+		bool last = sample;
+		size_t k = 0;
+
+		cap->m_offsets[k] = sample_idx;
+		cap->m_durations[k] = 1;
+		cap->m_samples[k] = sample;
+
+		for(sample_idx = 1; sample_idx < m_mdepth; sample_idx++)
+		{
+			buf_index = sample_idx / samples_per_word;
+			word_index = m_digitalChannelCount * (sample_idx % (samples_per_word / m_digitalChannelCount));
+			sample = (buf[buf_index] >> word_index) & 1;
+
+			// second condition for "rendering bug"
+			if(last == sample && ((sample_idx + 3) < m_mdepth))
+			{
+				cap->m_durations[k]++;
+			}
+			else
+			{
+				//Nope, it toggled - store the new value
+				k++;
+				cap->m_offsets[k] = sample_idx;
+				cap->m_durations[k] = 1;
+				cap->m_samples[k] = sample;
+				last = sample;
+			}
+		}
+
+		// Free space reclaimed by deduplication
+		cap->Resize(k);
+		cap->m_offsets.shrink_to_fit();
+		cap->m_durations.shrink_to_fit();
+		cap->m_samples.shrink_to_fit();
+		cap->MarkSamplesModifiedFromCpu();
+		cap->MarkTimestampsModifiedFromCpu();
+	}
+	//Just in case we missed anything from the capture
+	m_transport->FlushRXBuffer();
+
+	delete[] buf;
 
 	//Save the waveforms to our queue
 	m_pendingWaveformsMutex.lock();
@@ -383,6 +340,8 @@ bool PicoLogicAnalyser::AcquireData()
 	//If this was a one-shot trigger we're no longer armed
 	if(m_triggerOneShot)
 		m_triggerArmed = false;
+
+	ChannelsDownloadFinished();
 
 	return true;
 }
@@ -496,10 +455,9 @@ void PicoLogicAnalyser::SetSampleDepth(uint64_t depth)
 
 void PicoLogicAnalyser::SetSampleRate(uint64_t rate)
 {
-	m_srate = rate;
-
 	lock_guard<recursive_mutex> lock(m_mutex);
 	m_transport->SendCommand(string("RATE ") + to_string(rate));
+	m_srate = rate;
 }
 
 void PicoLogicAnalyser::SetTriggerOffset(int64_t offset)

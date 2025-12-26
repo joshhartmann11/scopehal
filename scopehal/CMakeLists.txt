@@ -175,6 +175,7 @@ set(SCOPEHAL_SOURCES
 	NanoVNA.cpp
 	OwonXDGFunctionGenerator.cpp
 	OwonXDMMultimeter.cpp
+	PicoOscilloscope.cpp
 	PicoLogicAnalyser.cpp
 	PicoVNA.cpp
 	RigolFunctionGenerator.cpp

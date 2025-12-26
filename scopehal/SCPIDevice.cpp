@@ -34,13 +34,12 @@ using namespace std;
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Construction / destruction
 
-SCPIDevice::SCPIDevice(SCPITransport* transport, bool identify)
-	: m_transport(transport)
+SCPIDevice::SCPIDevice(SCPITransport* transport, bool identify) : m_transport(transport)
 {
 	if(identify)
 	{
 		bool succeeded = false;
-		for (int retry = 0; retry < 3; retry++)
+		for(int retry = 0; retry < 3; retry++)
 		{
 			//Ask for the ID
 			m_transport->SendCommand("*IDN?");
@@ -53,7 +52,7 @@ SCPIDevice::SCPIDevice(SCPITransport* transport, bool identify)
 			{
 				LogWarning("Bad IDN response %s\n", reply.c_str());
 				m_transport->FlushRXBuffer();
-				continue; // retry
+				continue;	 // retry
 			}
 			m_vendor = vendor;
 			m_model = model;
@@ -61,11 +60,11 @@ SCPIDevice::SCPIDevice(SCPITransport* transport, bool identify)
 			m_fwVersion = version;
 
 			succeeded = true;
-			m_transport->FlushRXBuffer(); // In case our *IDNs got queued behind each other (Tek...)
-			break; // success
+			m_transport->FlushRXBuffer();	 // In case our *IDNs got queued behind each other (Tek...)
+			break;							 // success
 		}
 
-		if (!succeeded)
+		if(!succeeded)
 		{
 			LogError("Persistent bad IDN response, giving up\n");
 			return;

@@ -161,8 +161,8 @@ void TransportStaticInit()
 {
 	AddTransportClass(SCPISocketTransport);
 #if !defined(_WIN32) && !defined(__APPLE__)
-	// TMC is only supported on Linux for now
-	// https://github.com/glscopeclient/scopehal/issues/519
+// TMC is only supported on Linux for now
+// https://github.com/glscopeclient/scopehal/issues/519
 	AddTransportClass(SCPITMCTransport);
 #endif
 	AddTransportClass(SCPITwinLanTransport);
@@ -208,15 +208,11 @@ void DetectCPUFeatures()
 	if(g_hasAvx512VL)
 		LogDebug("* AVX512VL\n");
 	LogDebug("\n");
-#if defined(_WIN32) && \
-	defined(           \
-		__GNUC__)	 // AVX2 is temporarily disabled on MingW64/GCC until this in resolved: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=54412
-	if(g_hasAvx2 || g_hasAvx512F || g_hasAvx512DQ || g_hasAvx512VL)
+#if defined(_WIN32) && defined(__GNUC__) // AVX2 is temporarily disabled on MingW64/GCC until this in resolved: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=54412
+	if (g_hasAvx2 || g_hasAvx512F || g_hasAvx512DQ || g_hasAvx512VL)
 	{
 		g_hasAvx2 = g_hasAvx512F = g_hasAvx512DQ = g_hasAvx512VL = false;
-		LogWarning(
-			"AVX2/AVX512 detected but disabled on MinGW64/GCC (see "
-			"https://github.com/azonenberg/scopehal-apps/issues/295)\n");
+		LogWarning("AVX2/AVX512 detected but disabled on MinGW64/GCC (see https://github.com/azonenberg/scopehal-apps/issues/295)\n");
 	}
 #endif /* defined(_WIN32) && defined(__GNUC__) */
 #endif /* __x86_64__ */
@@ -311,7 +307,9 @@ void DriverStaticInit()
 string GetDefaultChannelColor(int i)
 {
 	const int NUM_COLORS = 12;
-	static const char* colorTable[NUM_COLORS] = {// cppcheck-suppress constStatement
+	static const char* colorTable[NUM_COLORS] =
+	{
+		// cppcheck-suppress constStatement
 		"#a6cee3",
 		"#1f78b4",
 		"#b2df8a",
@@ -323,7 +321,8 @@ string GetDefaultChannelColor(int i)
 		"#cab2d6",
 		"#6a3d9a",
 		"#ffff99",
-		"#b15928"};
+		"#b15928"
+	};
 
 	return colorTable[i % NUM_COLORS];
 }
@@ -352,7 +351,7 @@ void InitializePlugins()
 
 	//current binary dir
 	string binDir = GetDirOfCurrentExecutable();
-	if(!binDir.empty())
+	if ( !binDir.empty() )
 	{
 		//If the binary directory is under /usr, do *not* search it!
 		//We're probably in /usr/bin and we really do not want to be dlopen-ing every single thing in there.
@@ -413,21 +412,21 @@ void InitializePlugins()
 	// Get path of process image
 	TCHAR binPath[MAX_PATH];
 
-	if(GetModuleFileName(NULL, binPath, MAX_PATH) == 0)
+	if( GetModuleFileName(NULL, binPath, MAX_PATH) == 0 )
 	{
 		LogError("Error: GetModuleFileName() failed.\n");
 		return;
 	}
 
 	// Remove file name from path
-	if(!PathRemoveFileSpec(binPath))
+	if( !PathRemoveFileSpec(binPath) )
 	{
 		LogError("Error: PathRemoveFileSpec() failed.\n");
 		return;
 	}
 
 	TCHAR searchPath[MAX_PATH];
-	if(PathCombine(searchPath, binPath, "plugins\\*.dll") == NULL)
+	if( PathCombine(searchPath, binPath, "plugins\\*.dll") == NULL )
 	{
 		LogError("Error: PathCombine() failed.\n");
 		return;
@@ -458,7 +457,7 @@ void InitializePlugins()
 			// located in the plugins subdirectory
 			TCHAR filePath[MAX_PATH];
 
-			if(PathCombine(filePath, "plugins", fileName) == NULL)
+			if( PathCombine(filePath, "plugins", fileName) == NULL )
 			{
 				LogError("Error: PathCombine() failed.\n");
 				return;
@@ -489,7 +488,8 @@ void InitializePlugins()
 				LogWarning("Warning: Found plugin %s, but isn't valid library\n", fileNameCStr);
 			}
 		}
-	} while(0 != FindNextFile(findHandle, &findData));
+	}
+	while(0 != FindNextFile(findHandle, &findData));
 
 	auto error = GetLastError();
 
@@ -512,13 +512,12 @@ string Trim(const string& str)
 	string tmp;
 
 	//Skip leading spaces
-	size_t i = 0;
-	for(; i < str.length() && isspace(str[i]); i++)
-	{
-	}
+	size_t i=0;
+	for(; i<str.length() && isspace(str[i]); i++)
+	{}
 
 	//Read non-space stuff
-	for(; i < str.length(); i++)
+	for(; i<str.length(); i++)
 	{
 		//Non-space
 		char c = str[i];
@@ -545,13 +544,12 @@ string TrimQuotes(const string& str)
 	string tmp;
 
 	//Skip leading spaces
-	size_t i = 0;
-	for(; i < str.length() && (str[i] == '\"'); i++)
-	{
-	}
+	size_t i=0;
+	for(; i<str.length() && (str[i] == '\"'); i++)
+	{}
 
 	//Read non-space stuff
-	for(; i < str.length(); i++)
+	for(; i<str.length(); i++)
 	{
 		//Non-quote
 		char c = str[i];
@@ -569,7 +567,7 @@ string TrimQuotes(const string& str)
 	return ret;
 }
 
-string BaseName(const string& path)
+string BaseName(const string & path)
 {
 	return path.substr(path.find_last_of("/\\") + 1);
 }
@@ -620,7 +618,7 @@ uint64_t next_pow2(uint64_t v)
 	if(v == 1)
 		return 1;
 	else
-		return 1 << (64 - __builtin_clzll(v - 1));
+		return 1 << (64 - __builtin_clzll(v-1));
 #else
 	v--;
 	v |= v >> 1;
@@ -644,7 +642,7 @@ uint64_t prev_pow2(uint64_t v)
 	if(next == v)
 		return v;
 	else
-		return next / 2;
+		return next/2;
 }
 
 /**
@@ -688,15 +686,14 @@ string GetDirOfCurrentExecutable()
 	TCHAR binPath[MAX_PATH];
 	if(GetModuleFileName(NULL, binPath, MAX_PATH) == 0)
 		LogError("Error: GetModuleFileName() failed.\n");
-	else if(!PathRemoveFileSpec(binPath))
+	else if(!PathRemoveFileSpec(binPath) )
 		LogError("Error: PathRemoveFileSpec() failed.\n");
 	else
 		return binPath;
 #elif defined(__APPLE__)
 	char binDir[1024] = {0};
 	uint32_t size = sizeof(binDir) - 1;
-	if(_NSGetExecutablePath(binDir, &size) != 0)
-	{
+	if (_NSGetExecutablePath(binDir, &size) != 0) {
 		// Buffer size is too small.
 		LogError("Error: _NSGetExecutablePath() returned a path larger than our buffer.\n");
 		return "";
@@ -704,10 +701,10 @@ string GetDirOfCurrentExecutable()
 	return dirname(binDir);
 #else
 	char binDir[1024] = {0};
-	ssize_t readlinkReturn = readlink("/proc/self/exe", binDir, (sizeof(binDir) - 1));
-	if(readlinkReturn <= 0)
+	ssize_t readlinkReturn = readlink("/proc/self/exe", binDir, (sizeof(binDir) - 1) );
+	if ( readlinkReturn <= 0 )
 		LogError("Error: readlink() failed.\n");
-	else if((unsigned)readlinkReturn > (sizeof(binDir) - 1))
+	else if ( (unsigned) readlinkReturn > (sizeof(binDir) - 1) )
 		LogError("Error: readlink() returned a path larger than our buffer.\n");
 	else
 		return dirname(binDir);
@@ -724,7 +721,7 @@ void InitializeSearchPaths()
 	TCHAR binPath[MAX_PATH];
 	if(GetModuleFileName(NULL, binPath, MAX_PATH) == 0)
 		LogError("Error: GetModuleFileName() failed.\n");
-	else if(!PathRemoveFileSpec(binPath))
+	else if(!PathRemoveFileSpec(binPath) )
 		LogError("Error: PathRemoveFileSpec() failed.\n");
 	else
 	{
@@ -860,15 +857,15 @@ string FindDataFile(const string& relpath)
 
 void GetTimestampOfFile(string path, time_t& timestamp, int64_t& fs)
 {
-//TODO: Add Windows equivalent
-#ifndef _WIN32
-	struct stat st;
-	if(0 == stat(path.c_str(), &st))
-	{
-		timestamp = st.st_mtim.tv_sec;
-		fs = st.st_mtim.tv_nsec * 1000L * 1000L;
-	}
-#endif
+	//TODO: Add Windows equivalent
+	#ifndef _WIN32
+		struct stat st;
+		if(0 == stat(path.c_str(), &st))
+		{
+			timestamp = st.st_mtim.tv_sec;
+			fs = st.st_mtim.tv_nsec * 1000L * 1000L;
+		}
+	#endif
 }
 
 /**
@@ -913,7 +910,7 @@ string str_replace(const string& search, const string& replace, const string& su
 	string ret;
 
 	//This can probably be made more efficient, but for now we only call it on very short strings
-	for(size_t i = 0; i < subject.length(); i++)
+	for(size_t i=0; i<subject.length(); i++)
 	{
 		//Match?
 		if(0 == strncmp(&subject[i], &search[0], search.length()))
@@ -934,9 +931,10 @@ uint32_t GetComputeBlockCount(size_t numGlobal, size_t blockSize)
 {
 	uint32_t ret = numGlobal / blockSize;
 	if(numGlobal % blockSize)
-		ret++;
+		ret ++;
 	return ret;
 }
+
 
 #ifdef _WIN32
 
@@ -961,7 +959,7 @@ string ExpandPath(const string& in)
 	wordexp_t result;
 	wordexp(in.c_str(), &result, 0);
 	auto expanded = result.we_wordv[0];
-	string out{expanded};
+	string out{ expanded };
 	wordfree(&result);
 	return out;
 }
@@ -970,9 +968,7 @@ void CreateDirectory(const string& path)
 {
 	const auto expanded = ExpandPath(path);
 
-	struct stat fst
-	{
-	};
+	struct stat fst{ };
 
 	// Check if it exists
 	if(stat(expanded.c_str(), &fst) != 0)
@@ -1000,24 +996,27 @@ uint32_t CRC32(const uint8_t* bytes, size_t start, size_t end)
 	uint32_t poly = 0xedb88320;
 
 	uint32_t crc = 0xffffffff;
-	for(size_t n = start; n <= end; n++)
+	for(size_t n=start; n <= end; n++)
 	{
 		uint8_t d = bytes[n];
-		for(int i = 0; i < 8; i++)
+		for(int i=0; i<8; i++)
 		{
-			bool b = (crc ^ (d >> i)) & 1;
+			bool b = ( crc ^ (d >> i) ) & 1;
 			crc >>= 1;
 			if(b)
 				crc ^= poly;
 		}
 	}
 
-	return ~(((crc & 0x000000ff) << 24) | ((crc & 0x0000ff00) << 8) | ((crc & 0x00ff0000) >> 8) | (crc >> 24));
+	return ~(	((crc & 0x000000ff) << 24) |
+				((crc & 0x0000ff00) << 8) |
+				((crc & 0x00ff0000) >> 8) |
+				 (crc >> 24) );
 }
 
 uint32_t CRC32(const vector<uint8_t>& bytes)
 {
-	return CRC32(&bytes[0], 0, bytes.size() - 1);
+	return CRC32(&bytes[0], 0, bytes.size()-1);
 }
 
 /**
