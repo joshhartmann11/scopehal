@@ -250,16 +250,22 @@ Oscilloscope::TriggerMode PicoLogicAnalyser::PollTrigger()
 // this information could be added to the data in the data aquisition
 bool PicoLogicAnalyser::AcquireData()
 {
-	size_t word_size = 4;
-	size_t samples_per_word = (word_size * 8) - ((word_size * 8) % m_digitalChannelCount);
-	size_t words_per_capture = (GetSampleDepth() * m_digitalChannelCount + samples_per_word - 1) / samples_per_word;
+	const size_t word_size_bytes = 4;
+	const size_t samples_per_word = (word_size_bytes * 8) - ((word_size_bytes * 8) % m_digitalChannelCount);
+	const size_t words_per_capture = (GetSampleDepth() * m_digitalChannelCount) / samples_per_word;
 	uint32_t* buf = new uint32_t[words_per_capture];
 
 	// Read data
-	if(!m_transport->ReadRawData(words_per_capture * word_size, (unsigned char*)buf))
+	if(!m_transport->ReadRawData(words_per_capture * word_size_bytes, (unsigned char*)buf))
 	{
 		LogWarning("Couldn't read data from socket\n");
+		delete[] buf;
 		return false;
+	}
+
+	for(size_t i = 0; i < words_per_capture; i++)
+	{
+		LogWarning("Word %lu: 0x%08x\n", i, buf[i]);
 	}
 
 	// Create waveform for each channel
@@ -273,7 +279,7 @@ bool PicoLogicAnalyser::AcquireData()
 	}
 
 	// Unpack waveform
-	double now = GetTime();
+	const double now = GetTime();
 	for(size_t channel_idx = 0; channel_idx < m_digitalChannelCount; channel_idx++)
 	{
 		auto cap = caps[channel_idx];
@@ -287,10 +293,11 @@ bool PicoLogicAnalyser::AcquireData()
 		cap->PrepareForCpuAccess();
 
 		size_t sample_idx = 0;
-		size_t buf_index = sample_idx / samples_per_word;
-		size_t word_index = samples_per_word * (sample_idx % samples_per_word);
+		size_t buf_index = sample_idx / (samples_per_word / m_digitalChannelCount);
+		size_t word_index =
+			m_digitalChannelCount * (sample_idx % (samples_per_word / m_digitalChannelCount)) + channel_idx;
 		bool sample = (buf[buf_index] >> word_index) & 1;
-		bool last = sample;
+		//bool last = sample;
 		size_t k = 0;
 
 		cap->m_offsets[k] = sample_idx;
@@ -299,24 +306,26 @@ bool PicoLogicAnalyser::AcquireData()
 
 		for(sample_idx = 1; sample_idx < m_mdepth; sample_idx++)
 		{
-			buf_index = sample_idx / samples_per_word;
-			word_index = m_digitalChannelCount * (sample_idx % (samples_per_word / m_digitalChannelCount));
+			buf_index = sample_idx / (samples_per_word / m_digitalChannelCount);
+			word_index =
+				m_digitalChannelCount * (sample_idx % (samples_per_word / m_digitalChannelCount)) + channel_idx;
 			sample = (buf[buf_index] >> word_index) & 1;
 
+			// This can be cleaned up by actually using the deduplication
 			// second condition for "rendering bug"
-			if(last == sample && ((sample_idx + 3) < m_mdepth))
-			{
-				cap->m_durations[k]++;
-			}
-			else
-			{
-				//Nope, it toggled - store the new value
-				k++;
-				cap->m_offsets[k] = sample_idx;
-				cap->m_durations[k] = 1;
-				cap->m_samples[k] = sample;
-				last = sample;
-			}
+			// if(last == sample && ((sample_idx + 3) < m_mdepth))
+			// {
+			//	cap->m_durations[k]++;
+			//}
+			//else
+			//{
+			//Nope, it toggled - store the new value
+			k++;
+			cap->m_offsets[k] = sample_idx;
+			cap->m_durations[k] = 1;
+			cap->m_samples[k] = sample;
+			//last = sample;
+			//}
 		}
 
 		// Free space reclaimed by deduplication
@@ -339,7 +348,9 @@ bool PicoLogicAnalyser::AcquireData()
 
 	//If this was a one-shot trigger we're no longer armed
 	if(m_triggerOneShot)
+	{
 		m_triggerArmed = false;
+	}
 
 	ChannelsDownloadFinished();
 
