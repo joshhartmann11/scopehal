@@ -66,8 +66,8 @@ PicoLogicAnalyser::PicoLogicAnalyser(SCPITransport* transport)
 		chan->SetDefaultDisplayName();
 	}
 
-	SetSampleRate(100000L);
-	SetSampleDepth(10000);
+	SetSampleRate(GetSampleRatesNonInterleaved().at(0));
+	SetSampleDepth(GetSampleDepthsNonInterleaved().at(0));
 
 	//Configure the trigger
 	auto trig = new EdgeTrigger(this);
@@ -76,7 +76,7 @@ PicoLogicAnalyser::PicoLogicAnalyser(SCPITransport* transport)
 	trig->SetInput(0, StreamDescriptor(GetOscilloscopeChannel(0)));
 	SetTrigger(trig);
 	PushTrigger();
-	SetTriggerOffset(10 * 1000L * 1000L);
+	SetTriggerOffset(0);
 
 	//Create Vulkan objects for the waveform conversion
 	m_queue = g_vkQueueManager->GetComputeQueue("PicoLogicAnalyser.queue");
@@ -263,11 +263,6 @@ bool PicoLogicAnalyser::AcquireData()
 		return false;
 	}
 
-	for(size_t i = 0; i < words_per_capture; i++)
-	{
-		LogWarning("Word %lu: 0x%08x\n", i, buf[i]);
-	}
-
 	// Create waveform for each channel
 	SparseDigitalWaveform* caps[32];	// Max possible channels
 	SequenceSet s;
@@ -292,47 +287,17 @@ bool PicoLogicAnalyser::AcquireData()
 		cap->Resize(m_mdepth);
 		cap->PrepareForCpuAccess();
 
-		size_t sample_idx = 0;
-		size_t buf_index = sample_idx / (samples_per_word / m_digitalChannelCount);
-		size_t word_index =
-			m_digitalChannelCount * (sample_idx % (samples_per_word / m_digitalChannelCount)) + channel_idx;
-		bool sample = (buf[buf_index] >> word_index) & 1;
-		//bool last = sample;
-		size_t k = 0;
-
-		cap->m_offsets[k] = sample_idx;
-		cap->m_durations[k] = 1;
-		cap->m_samples[k] = sample;
-
-		for(sample_idx = 1; sample_idx < m_mdepth; sample_idx++)
+		for(size_t sample_idx = 0; sample_idx < m_mdepth; sample_idx++)
 		{
-			buf_index = sample_idx / (samples_per_word / m_digitalChannelCount);
-			word_index =
-				m_digitalChannelCount * (sample_idx % (samples_per_word / m_digitalChannelCount)) + channel_idx;
-			sample = (buf[buf_index] >> word_index) & 1;
+			const size_t bit_index = (channel_idx + sample_idx * m_digitalChannelCount);
+			const size_t buf_index = bit_index / 32;
+			const size_t word_index = bit_index % 32;
+			const bool sample = (buf[buf_index] >> word_index) & 1;
 
-			// This can be cleaned up by actually using the deduplication
-			// second condition for "rendering bug"
-			// if(last == sample && ((sample_idx + 3) < m_mdepth))
-			// {
-			//	cap->m_durations[k]++;
-			//}
-			//else
-			//{
-			//Nope, it toggled - store the new value
-			k++;
-			cap->m_offsets[k] = sample_idx;
-			cap->m_durations[k] = 1;
-			cap->m_samples[k] = sample;
-			//last = sample;
-			//}
+			cap->m_offsets[sample_idx] = sample_idx;
+			cap->m_durations[sample_idx] = 1;
+			cap->m_samples[sample_idx] = sample;
 		}
-
-		// Free space reclaimed by deduplication
-		cap->Resize(k);
-		cap->m_offsets.shrink_to_fit();
-		cap->m_durations.shrink_to_fit();
-		cap->m_samples.shrink_to_fit();
 		cap->MarkSamplesModifiedFromCpu();
 		cap->MarkTimestampsModifiedFromCpu();
 	}
