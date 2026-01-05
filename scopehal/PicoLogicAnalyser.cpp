@@ -42,19 +42,18 @@ using namespace std;
 //Construction / destruction
 
 PicoLogicAnalyser::PicoLogicAnalyser(SCPITransport* transport)
-	: SCPIDevice(transport), SCPIInstrument(transport), RemoteBridgeOscilloscope(transport)
+	: SCPIDevice(transport), SCPIInstrument(transport), RemoteBridgeOscilloscope(transport), m_digitalChannelCount(8)
 {
-	//Set up initial cache configuration as "not valid" and let it populate as we go
 	IdentifyHardware();
 
-	//Add digital channels (named 1D0...7 and 2D0...7)
+	// Add digital channels (named 1D0...7 and 2D0...7)
 	for(size_t i = 0; i < m_digitalChannelCount; i++)
 	{
 		size_t ichan = i;
 		string chname = "D";
 		chname += std::to_string(i);
 
-		//Create the channel
+		// Create the channel
 		auto chan = new OscilloscopeChannel(this,
 			chname,
 			GetChannelColor(ichan),
@@ -63,11 +62,13 @@ PicoLogicAnalyser::PicoLogicAnalyser(SCPITransport* transport)
 			Stream::STREAM_TYPE_DIGITAL,
 			i);
 		m_channels.push_back(chan);
+		m_channelsEnabled[i] = true;
 		chan->SetDefaultDisplayName();
 	}
 
 	SetSampleRate(GetSampleRatesNonInterleaved().at(0));
 	SetSampleDepth(GetSampleDepthsNonInterleaved().at(0));
+	SetNumChannels();
 
 	//Configure the trigger
 	auto trig = new EdgeTrigger(this);
@@ -144,10 +145,6 @@ string PicoLogicAnalyser::GetChannelColor(size_t i)
 void PicoLogicAnalyser::IdentifyHardware()
 {
 	LogWarning("PicoScope model \"%s\"\n", m_model.c_str());
-
-	// Ask the scope how many channels it has
-	m_transport->SendCommand("CHANS?");
-	m_digitalChannelCount = stoi(m_transport->ReadReply());
 }
 
 PicoLogicAnalyser::~PicoLogicAnalyser()
@@ -185,15 +182,42 @@ void PicoLogicAnalyser::FlushConfigCache()
 
 bool PicoLogicAnalyser::IsChannelEnabled(size_t i)
 {
-	return true;
+	return m_channelsEnabled[i];
+}
+
+void PicoLogicAnalyser::SetNumChannels()
+{
+	size_t last_enabled_channel = 0;
+	for(size_t i = 0; i < m_digitalChannelCount; i++)
+	{
+		if(m_channelsEnabled[i])
+		{
+			last_enabled_channel = i;
+		}
+	}
+
+	std::string command = "CHANS " + std::to_string(last_enabled_channel + 1);
+	m_transport->SendCommand(command);
+	SetSampleDepth(GetSampleDepthsNonInterleaved().at(0));
+}
+
+size_t PicoLogicAnalyser::DigitalChannelsActive()
+{
+	m_transport->SendCommand("CHANS?");
+	size_t channels = (size_t)stoi(m_transport->ReadReply());
+	return channels;
 }
 
 void PicoLogicAnalyser::EnableChannel(size_t i)
 {
+	m_channelsEnabled[i] = true;
+	SetNumChannels();
 }
 
 void PicoLogicAnalyser::DisableChannel(size_t i)
 {
+	m_channelsEnabled[i] = false;
+	SetNumChannels();
 }
 
 vector<OscilloscopeChannel::CouplingType> PicoLogicAnalyser::GetAvailableCouplings(size_t /*i*/)
@@ -251,8 +275,10 @@ Oscilloscope::TriggerMode PicoLogicAnalyser::PollTrigger()
 bool PicoLogicAnalyser::AcquireData()
 {
 	const size_t word_size_bytes = 4;
-	const size_t samples_per_word = (word_size_bytes * 8) - ((word_size_bytes * 8) % m_digitalChannelCount);
-	const size_t words_per_capture = (GetSampleDepth() * m_digitalChannelCount) / samples_per_word;
+	const size_t digital_channels_active = DigitalChannelsActive();
+	LogWarning("DigitalChannelsActive %lu", digital_channels_active);
+	const size_t samples_per_word = (word_size_bytes * 8) - ((word_size_bytes * 8) % digital_channels_active);
+	const size_t words_per_capture = (GetSampleDepth() * digital_channels_active) / samples_per_word;
 	uint32_t* buf = new uint32_t[words_per_capture];
 
 	// Read data
@@ -264,9 +290,9 @@ bool PicoLogicAnalyser::AcquireData()
 	}
 
 	// Create waveform for each channel
-	SparseDigitalWaveform* caps[32];	// Max possible channels
+	SparseDigitalWaveform* caps[16];	// Max possible channels
 	SequenceSet s;
-	for(size_t channel_idx = 0; channel_idx < m_digitalChannelCount; channel_idx++)
+	for(size_t channel_idx = 0; channel_idx < digital_channels_active; channel_idx++)
 	{
 		caps[channel_idx] =
 			AllocateDigitalWaveform(m_nickname + "." + GetOscilloscopeChannel(channel_idx)->GetHwname());
@@ -275,7 +301,7 @@ bool PicoLogicAnalyser::AcquireData()
 
 	// Unpack waveform
 	const double now = GetTime();
-	for(size_t channel_idx = 0; channel_idx < m_digitalChannelCount; channel_idx++)
+	for(size_t channel_idx = 0; channel_idx < digital_channels_active; channel_idx++)
 	{
 		auto cap = caps[channel_idx];
 		cap->m_timescale = FS_PER_SECOND / GetSampleRate();
@@ -289,7 +315,7 @@ bool PicoLogicAnalyser::AcquireData()
 
 		for(size_t sample_idx = 0; sample_idx < m_mdepth; sample_idx++)
 		{
-			const size_t bit_index = (channel_idx + sample_idx * m_digitalChannelCount);
+			const size_t bit_index = (channel_idx + sample_idx * digital_channels_active);
 			const size_t buf_index = bit_index / 32;
 			const size_t word_index = bit_index % 32;
 			const bool sample = (buf[buf_index] >> word_index) & 1;

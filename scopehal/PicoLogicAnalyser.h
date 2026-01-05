@@ -56,6 +56,8 @@ public:
 
 	//Channel configuration
 	virtual bool IsChannelEnabled(size_t i) override;
+	virtual void SetNumChannels();
+	virtual size_t DigitalChannelsActive();
 	virtual void EnableChannel(size_t i) override;
 	virtual void DisableChannel(size_t i) override;
 	virtual std::vector<OscilloscopeChannel::CouplingType> GetAvailableCouplings(size_t i) override;
@@ -117,7 +119,7 @@ protected:
 
 	std::string GetChannelColor(size_t i);
 
-	//hardware analog channel count, independent of LA option etc
+	// MAX channel count
 	size_t m_digitalChannelCount;
 
 	OscilloscopeChannel* m_extTrigChannel;
