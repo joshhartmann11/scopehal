@@ -203,8 +203,14 @@ void PicoLogicAnalyser::SetNumChannels()
 
 size_t PicoLogicAnalyser::DigitalChannelsActive()
 {
-	m_transport->SendCommand("CHANS?");
-	size_t channels = (size_t)stoi(m_transport->ReadReply());
+	size_t channels = 0;
+	{
+		lock_guard<recursive_mutex> lock(m_mutex);
+		m_transport->FlushRXBuffer();
+		m_transport->SendCommand("CHANS?");
+		channels = (size_t)stoi(m_transport->ReadReply());
+	}
+
 	return channels;
 }
 
@@ -365,6 +371,7 @@ vector<uint64_t> PicoLogicAnalyser::GetSampleRatesNonInterleaved()
 	string rates;
 	{
 		lock_guard<recursive_mutex> lock(m_mutex);
+		m_transport->FlushRXBuffer();
 		m_transport->SendCommand("RATES?");
 		rates = m_transport->ReadReply();
 	}
@@ -409,6 +416,7 @@ vector<uint64_t> PicoLogicAnalyser::GetSampleDepthsNonInterleaved()
 	string depths;
 	{
 		lock_guard<recursive_mutex> lock(m_mutex);
+		m_transport->FlushRXBuffer();
 		m_transport->SendCommand("DEPTHS?");
 		depths = m_transport->ReadReply();
 	}

@@ -47,8 +47,7 @@ using namespace std;
 	@param args	Arguments, of the format host:port
 				If port number is not specified, defaults to 5025
  */
-SCPISocketTransport::SCPISocketTransport(const string& args)
-	: m_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+SCPISocketTransport::SCPISocketTransport(const string& args) : m_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
 {
 	char hostname[128];
 	unsigned int port = 0;
@@ -74,9 +73,7 @@ SCPISocketTransport::SCPISocketTransport(const string& args)
 	@param port			Port number of the instrument
  */
 SCPISocketTransport::SCPISocketTransport(const string& hostname, unsigned short port)
-	: m_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
-	, m_hostname(hostname)
-	, m_port(port)
+	: m_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP), m_hostname(hostname), m_port(port)
 {
 	SharedCtorInit();
 }
@@ -94,9 +91,9 @@ void SCPISocketTransport::SharedCtorInit()
 		LogError("Couldn't connect to socket\n");
 		return;
 	}
-	if(!m_socket.SetRxTimeout(5000000))
+	if(!m_socket.SetRxTimeout(30000000))
 		LogWarning("No Rx timeout: %s\n", strerror(errno));
-	if(!m_socket.SetTxTimeout(5000000))
+	if(!m_socket.SetTxTimeout(30000000))
 		LogWarning("No Tx timeout: %s\n", strerror(errno));
 	if(!m_socket.DisableNagle())
 	{
@@ -153,7 +150,7 @@ string SCPISocketTransport::ReadReply(bool endOnSemicolon, [[maybe_unused]] func
 	{
 		if(!m_socket.RecvLooped((unsigned char*)&tmp, 1))
 			break;
-		if( (tmp == '\n') || ( (tmp == ';') && endOnSemicolon ) )
+		if((tmp == '\n') || ((tmp == ';') && endOnSemicolon))
 			break;
 		else
 			ret += tmp;
@@ -175,18 +172,18 @@ void SCPISocketTransport::SendRawData(size_t len, const unsigned char* buf)
 size_t SCPISocketTransport::ReadRawData(size_t len, unsigned char* buf, std::function<void(float)> progress)
 {
 	size_t chunk_size = len;
-	if (progress)
+	if(progress)
 	{
 		/* carve up the chunk_size into either 1% or 32kB chunks, whichever is larger; later, we'll want RecvLooped to do this for us */
 		chunk_size /= 100;
-		if (chunk_size < 32768)
+		if(chunk_size < 32768)
 			chunk_size = 32768;
 	}
 
-	for (size_t pos = 0; pos < len; )
+	for(size_t pos = 0; pos < len;)
 	{
 		size_t n = chunk_size;
-		if (n > (len - pos))
+		if(n > (len - pos))
 			n = len - pos;
 		if(!m_socket.RecvLooped(buf + pos, n))
 		{
@@ -194,7 +191,7 @@ size_t SCPISocketTransport::ReadRawData(size_t len, unsigned char* buf, std::fun
 			return 0;
 		}
 		pos += n;
-		if (progress)
+		if(progress)
 		{
 			progress((float)pos / (float)len);
 		}
